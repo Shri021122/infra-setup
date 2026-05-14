@@ -47,10 +47,16 @@ install_worker() {
 
   # Install RKE2 agent
   ssh_exec "$node_ip" "
-    curl -sfL https://get.rke2.io | \
-      INSTALL_RKE2_VERSION='${RKE2_VERSION}' \
-      INSTALL_RKE2_TYPE='agent' \
-      sh -
+    curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION='${RKE2_VERSION}' INSTALL_RKE2_TYPE='agent' sh -
+  "
+
+  # Apply kernel settings required by kubelet protect-kernel-defaults
+  ssh_exec "$node_ip" "
+    sudo sysctl -w kernel.panic=10
+    sudo sysctl -w kernel.panic_on_oops=1
+    echo 'kernel.panic=10' | sudo tee -a /etc/sysctl.d/99-rke2.conf
+    echo 'kernel.panic_on_oops=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf
+    sudo sysctl --system
   "
 
   # Enable and start

@@ -69,10 +69,7 @@ install_master() {
   # 3. Download and install RKE2
   log "Downloading RKE2 ${RKE2_VERSION}..."
   ssh_exec "$node_ip" "
-    curl -sfL https://get.rke2.io | \
-      INSTALL_RKE2_VERSION='${RKE2_VERSION}' \
-      INSTALL_RKE2_TYPE='server' \
-      sh -
+    curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION='${RKE2_VERSION}' INSTALL_RKE2_TYPE='server' sh -
   "
 
   # 4. Inject cluster token
@@ -118,7 +115,17 @@ KVEOF
     log "  Cilium config deployed — IngressController + Hubble + WireGuard will activate on RKE2 start"
   fi
 
-  # 6. Enable and start RKE2
+  # 6. Apply kernel settings required by kubelet protect-kernel-defaults
+  log "Applying kernel sysctl settings..."
+  ssh_exec "$node_ip" "
+    sudo sysctl -w kernel.panic=10
+    sudo sysctl -w kernel.panic_on_oops=1
+    echo 'kernel.panic=10' | sudo tee -a /etc/sysctl.d/99-rke2.conf
+    echo 'kernel.panic_on_oops=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf
+    sudo sysctl --system
+  "
+
+  # 7. Enable and start RKE2
   log "Starting RKE2 server service..."
   ssh_exec "$node_ip" "
     sudo systemctl daemon-reload
