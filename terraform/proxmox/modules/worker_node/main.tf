@@ -4,6 +4,19 @@
 # Scaling: increment worker_count in tfvars — no master-side changes needed.
 ################################################################################
 
+terraform {
+  required_providers {
+    proxmox = {
+      source  = "bpg/proxmox"
+      version = "~> 0.46"
+    }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.2"
+    }
+  }
+}
+
 resource "proxmox_virtual_environment_vm" "worker" {
   vm_id       = var.vm_id
   name        = var.hostname

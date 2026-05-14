@@ -3,6 +3,19 @@
 # Creates a single RKE2 control-plane node on Proxmox
 ################################################################################
 
+terraform {
+  required_providers {
+    proxmox = {
+      source  = "bpg/proxmox"
+      version = "~> 0.46"
+    }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.2"
+    }
+  }
+}
+
 resource "proxmox_virtual_environment_vm" "master" {
   vm_id       = var.vm_id
   name        = var.hostname
