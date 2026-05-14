@@ -17,9 +17,17 @@ variable "proxmox_username" {
 }
 
 variable "proxmox_password" {
-  description = "Proxmox API password. Use TF_VAR_proxmox_password env var."
+  description = "Proxmox API password. Use TF_VAR_proxmox_password env var. Leave empty if using api_token."
   type        = string
   sensitive   = true
+  default     = ""
+}
+
+variable "proxmox_api_token" {
+  description = "Proxmox API token, format: user@realm!tokenid=UUID. Use TF_VAR_proxmox_api_token env var."
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 
 variable "proxmox_tls_insecure" {

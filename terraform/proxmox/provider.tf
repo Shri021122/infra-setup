@@ -39,8 +39,12 @@ terraform {
 
 provider "proxmox" {
   endpoint = var.proxmox_api_url
-  username = var.proxmox_username
-  password = var.proxmox_password
+
+  # Auth: prefer API token (set TF_VAR_proxmox_api_token="user@realm!tokenid=UUID").
+  # Falls back to username/password if token is empty.
+  api_token = var.proxmox_api_token != "" ? var.proxmox_api_token : null
+  username  = var.proxmox_api_token == "" ? var.proxmox_username : null
+  password  = var.proxmox_api_token == "" ? var.proxmox_password : null
 
   # Set to true only in lab/dev environments
   insecure = var.proxmox_tls_insecure
