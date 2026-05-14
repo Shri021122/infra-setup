@@ -83,6 +83,9 @@ module "master_nodes" {
   protection      = var.vm_protection
   start_on_boot   = var.vm_start_on_boot
 
+  # SSH provisioner key
+  ssh_private_key_path = var.vm_ssh_private_key_path
+
   # RKE2
   rke2_version   = var.rke2_version
   cluster_name   = var.cluster_name
@@ -135,6 +138,9 @@ module "worker_nodes" {
   cloud_init_snippet = proxmox_virtual_environment_file.cloud_init_common.id
   ssh_public_key     = var.vm_ssh_public_key != "" ? var.vm_ssh_public_key : tls_private_key.cluster_ssh.public_key_openssh
   vm_user            = var.vm_user
+
+  # SSH provisioner key
+  ssh_private_key_path = var.vm_ssh_private_key_path
 
   # Behavior
   agent_enabled = var.vm_agent_enabled
