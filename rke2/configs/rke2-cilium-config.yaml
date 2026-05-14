@@ -96,9 +96,7 @@ spec:
           - icmp
           - http
         serviceMonitor:
-          enabled: true
-          labels:
-            release: kube-prometheus-stack
+          enabled: false  # Enable after Prometheus Operator CRDs are installed
 
     # ── Encryption ───────────────────────────────────────────────────────────
     # WireGuard node-to-node encryption — zero-config, transparent
@@ -116,17 +114,13 @@ spec:
       enabled: true
       port: 9962
       serviceMonitor:
-        enabled: true
-        labels:
-          release: kube-prometheus-stack
+        enabled: false  # Enable after Prometheus Operator CRDs are installed
 
     operator:
       prometheus:
         enabled: true
         serviceMonitor:
-          enabled: true
-          labels:
-            release: kube-prometheus-stack
+          enabled: false  # Enable after Prometheus Operator CRDs are installed
       replicas: 2    # HA for cilium-operator
 
     # ── IPAM ──────────────────────────────────────────────────────────────────
