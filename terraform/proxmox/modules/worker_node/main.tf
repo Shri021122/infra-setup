@@ -25,7 +25,6 @@ resource "proxmox_virtual_environment_vm" "worker" {
   tags = [for k, v in var.tags : lower(replace("${k}-${v}", "/[^a-z0-9_-]/", "-"))]
 
   node_name = var.proxmox_node
-  scsihw    = "virtio-scsi-single"
 
   clone {
     vm_id   = var.template_vm_id
