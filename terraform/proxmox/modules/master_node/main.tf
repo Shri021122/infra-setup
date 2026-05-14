@@ -130,12 +130,10 @@ resource "proxmox_virtual_environment_vm" "master" {
     ]
   }
 
-  # Allow time for cloud-init to finish
-  timeouts {
-    create = "20m"
-    update = "10m"
-    delete = "5m"
-  }
+  # Allow time for cloud-init to finish (bpg/proxmox uses top-level timeout_* args)
+  timeout_clone  = 1200
+  timeout_create = 1200
+  timeout_stop_vm = 300
 }
 
 # Format etcd disk after VM creation

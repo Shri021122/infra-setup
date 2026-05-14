@@ -116,11 +116,10 @@ resource "proxmox_virtual_environment_vm" "worker" {
     ignore_changes = [clone, tags]
   }
 
-  timeouts {
-    create = "20m"
-    update = "10m"
-    delete = "5m"
-  }
+  # bpg/proxmox uses top-level timeout_* args (seconds), not a timeouts block
+  timeout_clone  = 1200
+  timeout_create = 1200
+  timeout_stop_vm = 300
 }
 
 # Format and mount the data disk for container workloads
