@@ -48,18 +48,19 @@ resource "proxmox_virtual_environment_vm" "master" {
   }
 
   # OS disk (cloned from template)
+  # Root disk — RESIZES the cloned template disk (must match template interface: scsi0)
   disk {
-    interface    = "virtio0"
+    interface    = "scsi0"
     size         = var.disk_size_gb
     datastore_id = var.disk_storage
-    discard      = "on"      # Enables TRIM for SSDs
+    discard      = "on"
     ssd          = true
-    iothread     = true      # Per-disk IO thread for better performance
+    iothread     = true
   }
 
-  # Dedicated etcd disk — separate disk prevents etcd I/O from starving system
+  # Dedicated etcd disk — NEW disk added on top of the clone
   disk {
-    interface    = "virtio1"
+    interface    = "scsi1"
     size         = var.etcd_disk_size_gb
     datastore_id = var.disk_storage
     discard      = "on"
@@ -114,7 +115,7 @@ resource "proxmox_virtual_environment_vm" "master" {
   }
 
   # Boot order: disk first, network second
-  boot_order = ["virtio0", "net0"]
+  boot_order = ["scsi0", "net0"]
 
   # VM lifecycle
   protection    = var.protection
@@ -158,7 +159,7 @@ resource "null_resource" "format_etcd_disk" {
       # Wait for cloud-init
       "cloud-init status --wait",
       # Format and mount etcd disk
-      "sudo mkfs.ext4 -F -L etcd /dev/vdb",
+      "sudo mkfs.ext4 -F -L etcd /dev/sdb",
       "sudo mkdir -p /var/lib/rancher/rke2/server/db",
       "echo 'LABEL=etcd /var/lib/rancher/rke2/server/db ext4 defaults,noatime 0 2' | sudo tee -a /etc/fstab",
       "sudo mount -a",

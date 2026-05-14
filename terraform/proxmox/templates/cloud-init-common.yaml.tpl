@@ -8,8 +8,18 @@ users:
     ssh_authorized_keys:
       - ${ssh_public_key}
 
+# Grow root partition+filesystem to fill the disk BEFORE installing/upgrading
+growpart:
+  mode: auto
+  devices: ["/"]
+  ignore_growroot_disabled: false
+
+resize_rootfs: true
+
+# Update apt cache but DO NOT dist-upgrade on first boot — that fills the small
+# base image before growpart finishes. Upgrade separately after first boot.
 package_update: true
-package_upgrade: true
+package_upgrade: false
 
 packages:
   - curl

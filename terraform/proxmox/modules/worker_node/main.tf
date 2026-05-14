@@ -21,7 +21,8 @@ resource "proxmox_virtual_environment_vm" "worker" {
   vm_id       = var.vm_id
   name        = var.hostname
   description = "RKE2 Worker Node ${var.index + 1} — managed by Terraform"
-  tags        = [for k, v in var.tags : "${k}=${v}"]
+  # Proxmox tags allow only [a-z0-9_-]; collapse k/v with hyphen, lowercase
+  tags = [for k, v in var.tags : lower(replace("${k}-${v}", "/[^a-z0-9_-]/", "-"))]
 
   node_name = var.proxmox_node
 
@@ -44,9 +45,9 @@ resource "proxmox_virtual_environment_vm" "worker" {
     floating  = var.memory_mb / 2  # Min guaranteed = 50% of dedicated
   }
 
-  # OS disk
+  # Root disk — RESIZES the cloned template disk (must match template interface: scsi0)
   disk {
-    interface    = "virtio0"
+    interface    = "scsi0"
     size         = var.disk_size_gb
     datastore_id = var.disk_storage
     discard      = "on"
@@ -54,9 +55,9 @@ resource "proxmox_virtual_environment_vm" "worker" {
     iothread     = true
   }
 
-  # Data disk for container images and volumes (local-path provisioner)
+  # Data disk for container images and volumes (NEW disk on top of clone)
   disk {
-    interface    = "virtio1"
+    interface    = "scsi1"
     size         = var.data_disk_size_gb
     datastore_id = var.disk_storage
     discard      = "on"
@@ -106,7 +107,7 @@ resource "proxmox_virtual_environment_vm" "worker" {
     type = var.os_type
   }
 
-  boot_order = ["virtio0", "net0"]
+  boot_order = ["scsi0", "net0"]
 
   protection = var.protection
   started    = true
@@ -142,7 +143,7 @@ resource "null_resource" "setup_worker_data_disk" {
     inline = [
       "cloud-init status --wait",
       # Format data disk with XFS (preferred for container workloads)
-      "sudo mkfs.xfs -f -L containerd /dev/vdb",
+      "sudo mkfs.xfs -f -L containerd /dev/sdb",
       "sudo mkdir -p /var/lib/rancher",
       "echo 'LABEL=containerd /var/lib/rancher xfs defaults,noatime,nodiratime 0 2' | sudo tee -a /etc/fstab",
       "sudo mount -a",
