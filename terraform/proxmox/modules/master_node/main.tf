@@ -20,7 +20,8 @@ resource "proxmox_virtual_environment_vm" "master" {
   vm_id       = var.vm_id
   name        = var.hostname
   description = "RKE2 Control Plane Node ${var.index + 1} — managed by Terraform"
-  tags        = [for k, v in var.tags : "${k}=${v}"]
+  # Proxmox tags allow only [a-z0-9_-]; collapse k/v with hyphen, lowercase
+  tags = [for k, v in var.tags : lower(replace("${k}-${v}", "/[^a-z0-9_-]/", "-"))]
 
   node_name = var.proxmox_node
 
