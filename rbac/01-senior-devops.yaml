@@ -1,0 +1,121 @@
+################################################################################
+# RBAC: senior-devops
+# Full cluster administration — equivalent to cluster-admin minus
+# the ability to modify RBAC bindings (prevents privilege escalation).
+################################################################################
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: senior-devops
+  labels:
+    rbac.rke2.io/managed: "true"
+    team: devops
+    level: senior
+rules:
+  # Full access to core resources
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - namespaces
+      - pods
+      - pods/log
+      - pods/exec
+      - pods/portforward
+      - pods/attach
+      - pods/status
+      - services
+      - endpoints
+      - configmaps
+      - persistentvolumes
+      - persistentvolumeclaims
+      - replicationcontrollers
+      - serviceaccounts
+      - events
+      - secrets
+      - resourcequotas
+      - limitranges
+    verbs: ["*"]
+
+  # Apps — full access
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+    verbs: ["*"]
+
+  # Batch jobs
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["*"]
+
+  # Networking
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies", "ingressclasses"]
+    verbs: ["*"]
+
+  # Storage
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "volumeattachments", "csinodes"]
+    verbs: ["*"]
+
+  # Autoscaling
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["*"]
+
+  # Policy
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["*"]
+
+  # CRDs (read-only for safety)
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+
+  # Helm/Flux CRDs
+  - apiGroups: ["helm.cattle.io"]
+    resources: ["*"]
+    verbs: ["*"]
+
+  # Cert-manager
+  - apiGroups: ["cert-manager.io"]
+    resources: ["*"]
+    verbs: ["*"]
+
+  # Monitoring CRDs (Prometheus Operator)
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["*"]
+    verbs: ["*"]
+
+  # Read RBAC — can see but not modify cluster-level bindings
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - clusterroles
+      - clusterrolebindings
+      - roles
+      - rolebindings
+    verbs: ["get", "list", "watch"]
+
+  # Node metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: senior-devops-binding
+  labels:
+    rbac.rke2.io/managed: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: senior-devops
+subjects:
+  - kind: Group
+    name: senior-devops     # Map to this group name in kubeconfig
+    apiGroup: rbac.authorization.k8s.io

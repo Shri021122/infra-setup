@@ -1,0 +1,65 @@
+################################################################################
+# Namespace Setup
+# Creates namespaces with labels for Pod Security Standards enforcement
+################################################################################
+---
+# Production workloads — restricted PSS
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    environment: production
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# Staging — baseline PSS (less strict for testing)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    environment: staging
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# Development namespace — baseline, warn on restricted violations
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: development
+  labels:
+    environment: development
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: baseline
+---
+# Monitoring — privileged PSS (Prometheus, node-exporter need host access)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    environment: platform
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+---
+# NOTE: No logging namespace — Grafana Alloy runs as systemd on each VM,
+# reads /var/log/pods/* and journald directly, pushes to central Loki.
+---
+# NOTE: No ingress-nginx namespace — Cilium IngressController runs in kube-system.
+# kube-system already has privileged PSS by default in RKE2.
+---
+# Certificate management
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    environment: platform
+    pod-security.kubernetes.io/enforce: restricted

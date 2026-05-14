@@ -1,0 +1,29 @@
+# Secrets — NEVER commit these
+.secrets/
+*.tfvars
+!*.tfvars.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+kubeconfig*.yaml
+kubeconfigs/*.yaml
+rke2/configs/inventory.ini
+rke2/configs/master-*-config.yaml
+rke2/configs/worker-*-config.yaml
+
+# Terraform state — use remote backend in production
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+*.tfplan
+
+# OS / Editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/settings.json

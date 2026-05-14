@@ -1,0 +1,82 @@
+################################################################################
+# cert-manager ClusterIssuers
+# Provides automatic TLS for application ingresses via Cilium IngressController.
+# Replace email and server with your values.
+################################################################################
+---
+# Production issuer — rate limited, use for real domains
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: YOUR_EMAIL@yourdomain.com    # Required by Let's Encrypt
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      # HTTP-01 challenge via ingress (works if domain is publicly accessible)
+      - http01:
+          ingress:
+            class: cilium
+      # DNS-01 challenge via Route53 (works for internal/wildcard certs)
+      # Uncomment and configure if using DNS-01:
+      # - dns01:
+      #     route53:
+      #       region: us-east-1
+      #       hostedZoneID: YOUR_HOSTED_ZONE_ID
+      #       accessKeyID: YOUR_ACCESS_KEY_ID
+      #       secretAccessKeySecretRef:
+      #         name: route53-credentials
+      #         key: secret-access-key
+---
+# Staging issuer — unlimited rate, use for testing
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: YOUR_EMAIL@yourdomain.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - http01:
+          ingress:
+            class: cilium
+---
+# Self-signed issuer — for internal cluster communication
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+# Internal CA issuer — generates a CA then signs cluster-internal certs
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cluster-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: cluster.internal
+  secretName: cluster-ca-key-pair
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: cluster-ca-issuer
+spec:
+  ca:
+    secretName: cluster-ca-key-pair

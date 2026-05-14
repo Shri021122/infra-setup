@@ -1,0 +1,151 @@
+################################################################################
+# Cilium HelmChartConfig for RKE2
+# Place this at: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+# on the INIT master BEFORE starting rke2-server for the first time.
+#
+# RKE2's built-in Helm controller applies this automatically.
+# It overrides the default Cilium Helm values that RKE2 ships with.
+#
+# This config enables:
+#   - Cilium IngressController (replaces NGINX)
+#   - Cilium Gateway API (modern alternative to Ingress)
+#   - Hubble (network observability — metrics/flows)
+#   - kube-proxy replacement (full eBPF data plane)
+#   - LoadBalancer IP via kube-vip (already deployed)
+################################################################################
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-cilium
+  namespace: kube-system
+spec:
+  valuesContent: |-
+
+    # ── kube-proxy replacement ────────────────────────────────────────────────
+    # Full eBPF-based data plane — no kube-proxy process needed
+    kubeProxyReplacement: true
+
+    # API server endpoint for Cilium to contact (use the kube-vip VIP)
+    # These are templated during install-master.sh — the script patches this file
+    k8sServiceHost: "CONTROL_PLANE_VIP_PLACEHOLDER"
+    k8sServicePort: 6443
+
+    # ── Cilium IngressController ──────────────────────────────────────────────
+    # Replaces NGINX — handles Kubernetes Ingress resources natively via eBPF
+    ingressController:
+      enabled: true
+      default: true                 # Makes 'cilium' the default IngressClass
+      loadbalancerMode: shared      # One shared LB IP for all ingresses
+                                    # Change to 'dedicated' for per-ingress IPs
+      service:
+        # kube-vip will assign an IP from your subnet to this LoadBalancer service
+        # Set the IP you want for ingress traffic (must be free in your subnet)
+        # Leave empty to let kube-vip pick from its pool
+        loadBalancerIP: ""          # SET THIS: e.g. "192.168.10.200"
+
+    # ── Gateway API ───────────────────────────────────────────────────────────
+    # More powerful than Ingress: supports HTTPRoute, GRPCRoute, TCPRoute
+    # Use GatewayClass 'cilium' in your Gateway resources
+    gatewayAPI:
+      enabled: true
+
+    # ── Hubble — Network Observability ───────────────────────────────────────
+    # Provides per-flow network metrics, DNS visibility, HTTP traffic analysis
+    # Metrics are scraped by Prometheus and remote-written to central Mimir
+    hubble:
+      enabled: true
+
+      tls:
+        enabled: true
+        auto:
+          method: helm
+
+      relay:
+        enabled: true
+        replicas: 1
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+
+      ui:
+        enabled: true
+        replicas: 1
+        ingress:
+          enabled: true
+          className: cilium
+          annotations:
+            cert-manager.io/cluster-issuer: "cluster-ca-issuer"
+          hosts:
+            - hubble.cluster.internal    # Change to your domain
+          tls:
+            - secretName: hubble-ui-tls
+              hosts:
+                - hubble.cluster.internal
+
+      # Export Hubble metrics to Prometheus (→ remote-written to central Mimir)
+      metrics:
+        enabled:
+          - dns:query;ignoreAAAA
+          - drop
+          - tcp
+          - flow
+          - icmp
+          - http
+        serviceMonitor:
+          enabled: true
+          labels:
+            release: kube-prometheus-stack
+
+    # ── Encryption ───────────────────────────────────────────────────────────
+    # WireGuard node-to-node encryption — zero-config, transparent
+    encryption:
+      enabled: true
+      type: wireguard
+      nodeEncryption: true
+
+    # ── Network policies ──────────────────────────────────────────────────────
+    # Enforce Kubernetes NetworkPolicy + Cilium's extended CiliumNetworkPolicy
+    policyEnforcementMode: "default"   # Enforce only on pods with policies
+
+    # ── Prometheus metrics ────────────────────────────────────────────────────
+    prometheus:
+      enabled: true
+      port: 9962
+      serviceMonitor:
+        enabled: true
+        labels:
+          release: kube-prometheus-stack
+
+    operator:
+      prometheus:
+        enabled: true
+        serviceMonitor:
+          enabled: true
+          labels:
+            release: kube-prometheus-stack
+      replicas: 2    # HA for cilium-operator
+
+    # ── IPAM ──────────────────────────────────────────────────────────────────
+    ipam:
+      mode: kubernetes    # Use Kubernetes node CIDR allocations
+
+    # ── Cluster mesh (optional — enable for multi-cluster) ───────────────────
+    cluster:
+      name: rke2-prod
+      id: 1
+
+    # ── Resources ─────────────────────────────────────────────────────────────
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: 2000m
+        memory: 2Gi
+
+    # ── Rollout: restart Cilium if config changes ──────────────────────────────
+    rollOutCiliumPods: true
