@@ -154,6 +154,8 @@ resource "null_resource" "setup_worker_data_disk" {
       "echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
       "echo 'net.bridge.bridge-nf-call-iptables=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
       "echo 'net.bridge.bridge-nf-call-ip6tables=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+      "echo 'kernel.panic=10' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+      "echo 'kernel.panic_on_oops=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
       "echo 'net.core.somaxconn=32768' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
       "sudo modprobe br_netfilter",
       "sudo modprobe overlay",
