@@ -196,7 +196,8 @@ resource "local_file" "rke2_master_config" {
   content = templatefile("${path.module}/templates/rke2-master-config.yaml.tpl", {
     node_ip          = each.value.ip_address
     node_name        = each.value.hostname
-    is_init_node     = each.key == 0
+    is_init_node     = tonumber(each.key) == 0
+    init_node_ip     = module.master_nodes[0].ip_address
     control_plane_vip = var.control_plane_vip
     vip_interface    = var.control_plane_vip_interface
     cluster_cidr     = var.rke2_cluster_cidr

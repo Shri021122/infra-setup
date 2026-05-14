@@ -7,8 +7,8 @@
 # cluster-init: true causes RKE2 to create a new etcd cluster.
 cluster-init: true
 %{ else ~}
-# This master JOINS the existing cluster via the VIP.
-server: https://${control_plane_vip}:9345
+# Join via master-1 direct IP — VIP only exists after kube-vip starts on master-1
+server: https://${init_node_ip}:9345
 %{ endif ~}
 
 # Node identity
