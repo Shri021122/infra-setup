@@ -84,10 +84,8 @@ install_master() {
     CLUSTER_TOKEN=$(cat "${SECRETS_DIR}/rke2-cluster-token")
   fi
 
-  ssh_exec "$node_ip" "
-    echo '${CLUSTER_TOKEN}' | sudo tee /etc/rancher/rke2/token > /dev/null
-    sudo chmod 600 /etc/rancher/rke2/token
-  "
+  # Inject token into config.yaml (RKE2 reads token: from config, not a token file)
+  ssh_exec "$node_ip" "sudo sed -i '/^token:/d' /etc/rancher/rke2/config.yaml; echo 'token: ${CLUSTER_TOKEN}' | sudo tee -a /etc/rancher/rke2/config.yaml > /dev/null"
 
   # 5. On init master: deploy kube-vip + Cilium IngressController config
   if [[ "$is_init" == "true" ]]; then
