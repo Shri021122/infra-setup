@@ -64,7 +64,6 @@ kube-controller-manager-arg:
   - "terminated-pod-gc-threshold=10"
   - "node-monitor-period=4s"
   - "node-monitor-grace-period=16s"
-  - "pod-eviction-timeout=2m"
 
 # Kube-scheduler
 kube-scheduler-arg:
