@@ -25,6 +25,7 @@ resource "proxmox_virtual_environment_vm" "worker" {
   tags = [for k, v in var.tags : lower(replace("${k}-${v}", "/[^a-z0-9_-]/", "-"))]
 
   node_name = var.proxmox_node
+  scsihw    = "virtio-scsi-single"
 
   clone {
     vm_id   = var.template_vm_id
@@ -135,7 +136,7 @@ resource "null_resource" "setup_worker_data_disk" {
     type        = "ssh"
     host        = var.ip_address
     user        = var.vm_user
-    private_key = file(var.ssh_private_key_path)
+    private_key = file(pathexpand(var.ssh_private_key_path))
     timeout     = "5m"
   }
 

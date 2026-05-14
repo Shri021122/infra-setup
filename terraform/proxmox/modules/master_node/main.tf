@@ -24,6 +24,7 @@ resource "proxmox_virtual_environment_vm" "master" {
   tags = [for k, v in var.tags : lower(replace("${k}-${v}", "/[^a-z0-9_-]/", "-"))]
 
   node_name = var.proxmox_node
+  scsihw    = "virtio-scsi-single"
 
   # Clone from template
   clone {
@@ -150,7 +151,7 @@ resource "null_resource" "format_etcd_disk" {
     type        = "ssh"
     host        = var.ip_address
     user        = var.vm_user
-    private_key = file(var.ssh_private_key_path)
+    private_key = file(pathexpand(var.ssh_private_key_path))
     timeout     = "5m"
   }
 

@@ -22,6 +22,7 @@ package_update: true
 package_upgrade: false
 
 packages:
+  # qemu-guest-agent and chrony are pre-baked into the template via virt-customize.
   - curl
   - wget
   - vim
@@ -36,8 +37,6 @@ packages:
   - ca-certificates
   - gnupg
   - lsb-release
-  - qemu-guest-agent
-  - chrony
 
 write_files:
   - path: /etc/chrony.conf
