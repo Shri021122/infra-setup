@@ -4,6 +4,15 @@
 # via Helm with production-grade configuration.
 ################################################################################
 
+terraform {
+  required_providers {
+    kubectl = {
+      source  = "gavinbunney/kubectl"
+      version = "~> 1.14"
+    }
+  }
+}
+
 resource "kubernetes_namespace" "monitoring" {
   metadata {
     name = var.namespace
@@ -41,24 +50,15 @@ resource "helm_release" "kube_prometheus_stack" {
       memory_request         = var.memory_request
       cpu_limit              = var.cpu_limit
       memory_limit           = var.memory_limit
-      grafana_admin_password = var.grafana_admin_password
-      grafana_domain         = var.grafana_domain
-      grafana_storage_size   = var.grafana_storage_size
-      grafana_replicas       = var.grafana_replicas
-      mimir_enabled          = var.mimir_enabled
-      external_prometheus_url = var.external_prometheus_url
+      central_mimir_url      = var.central_mimir_url
+      central_mimir_username = var.central_mimir_username
+      central_mimir_password = var.central_mimir_password
+      remote_write_timeout   = var.remote_write_timeout
+      remote_write_queue_max = var.remote_write_queue_max
       slack_webhook          = var.alertmanager_slack_webhook
       pagerduty_key          = var.alertmanager_pagerduty_key
       email_to               = var.alertmanager_email_to
       smtp_host              = var.alertmanager_smtp_host
-      ingress_class          = var.ingress_class
-      tls_cluster_issuer     = var.tls_cluster_issuer
-      oidc_enabled           = var.oidc_enabled
-      oidc_client_id         = var.oidc_client_id
-      oidc_client_secret     = var.oidc_client_secret
-      oidc_auth_url          = var.oidc_auth_url
-      oidc_token_url         = var.oidc_token_url
-      namespace              = var.namespace
     })
   ]
 
