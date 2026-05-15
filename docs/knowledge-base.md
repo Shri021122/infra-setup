@@ -16,8 +16,9 @@ date: "2026-05-15"
 7. [Security Hardening](#7-security-hardening)
 8. [Observability](#8-observability)
 9. [Day-2: Scaling, Backup, Upgrade](#9-day-2-scaling-backup-upgrade)
-10. [Troubleshooting Cheatsheet](#10-troubleshooting-cheatsheet)
-11. [Variable Reference](#11-variable-reference)
+10. [Uninstall — Destroy the Cluster](#10-uninstall--destroy-the-cluster)
+11. [Troubleshooting Cheatsheet](#11-troubleshooting-cheatsheet)
+12. [Variable Reference](#12-variable-reference)
 
 ---
 
@@ -574,7 +575,109 @@ velero schedule create daily --schedule="0 2 * * *" --ttl 720h \
 
 ---
 
-# 10. Troubleshooting Cheatsheet
+# 10. Uninstall — Destroy the Cluster
+
+Clean teardown is **two terraform destroys, in this order**, plus a local-files mop-up. Order matters: the observability stack (Prometheus, Alertmanager, monitoring namespace) lives **inside** the cluster — if you kill the VMs first, terraform can't reach the API to delete the Helm release and `terraform destroy` will hang.
+
+## 10.1 Set credentials
+
+```bash
+cd /path/to/infra-setup
+export TF_VAR_proxmox_api_token='terraform@pve!terraform=<UUID>'    # same one used to deploy
+```
+
+## 10.2 Destroy in order
+
+### (a) Observability — while the cluster is still up
+
+```bash
+cd terraform/observability
+terraform destroy -auto-approve
+cd ../..
+```
+
+Removes: `helm_release.kube_prometheus_stack`, the `kubectl_manifest` for infra alert rules, the `monitoring` namespace.
+
+### (b) VMs + everything Terraform created on Proxmox
+
+```bash
+cd terraform/proxmox
+terraform destroy -auto-approve
+cd ../..
+```
+
+Removes:
+
+- 5 VMs (`401/402/403/410/411`)
+- Their etcd-disk and worker-data-disk format `null_resource`s
+- The cloud-init common snippet on Proxmox `local` storage
+- The Terraform-generated SSH keypair in `.secrets/`
+- `rke2/configs/inventory.ini` and every `master-N-config.yaml` / `worker-N-config.yaml`
+
+## 10.3 Files Terraform doesn't manage
+
+The install scripts and kubectl applies created several artifacts outside Terraform's view. Remove them:
+
+```bash
+rm -rf .secrets/                # kubeconfig-admin.yaml, rke2-cluster-token (script-generated)
+rm -rf .logs/                   # deploy run logs
+rm -rf rbac/kubeconfigs/        # 4 role-specific kubeconfigs
+rm -rf rbac/certs/              # per-role private keys (if present)
+rm -f  terraform/proxmox/cluster.tfplan terraform/observability/obs.tfplan
+
+# Stale SSH host keys (the dead VMs' fingerprints in known_hosts)
+for ip in 10.10.18.101 10.10.18.102 10.10.18.103 10.10.18.111 10.10.18.112; do
+  ssh-keygen -R "$ip" -f ~/.ssh/known_hosts 2>/dev/null
+done
+```
+
+## 10.4 (Optional) Wipe terraform state + provider downloads
+
+Only do this if you're sure you won't redeploy soon. State files remain on disk after a `destroy`, just empty.
+
+```bash
+rm -f  terraform/proxmox/terraform.tfstate*
+rm -f  terraform/observability/terraform.tfstate*
+rm -rf terraform/proxmox/.terraform terraform/observability/.terraform
+```
+
+## 10.5 Verify
+
+```bash
+# On Proxmox host — should print nothing
+ssh root@<proxmox-ip> "qm list | awk '\$1 ~ /^(40[1-3]|41[01])$/'"
+
+# Locally
+git status   # only gitignored leftovers should appear; no surprises
+```
+
+## 10.6 Gotchas
+
+- **If the cluster is already dead** when you reach step (a), `terraform destroy` will hang trying to reach the apiserver. Recover by removing the orphaned resources from state first:
+
+  ```bash
+  cd terraform/observability
+  terraform state list | xargs -n1 terraform state rm
+  terraform destroy -auto-approve   # now a no-op
+  ```
+
+- **Proxmox API token** keeps working after destroy. Revoke if you're not redeploying:
+
+  ```bash
+  ssh root@<proxmox-ip> "pveum user token remove terraform@pve terraform"
+  ```
+
+- **What Terraform does NOT touch** (persists for future deploys):
+  - The Ubuntu 22.04 cloud-init template VM (e.g. ID `9200`) — that was Phase-1 manual setup
+  - The Proxmox storage pool, network bridge (`vmbrk8s`), the `terraform@pve` user/role
+  - Your `~/.ssh/rke2_cluster_id` keypair (it's your key, not Terraform's)
+  - Your central Mimir/Loki/Grafana stack (it was never inside the cluster)
+
+- **In-cluster Kubernetes resources** (RBAC, NetworkPolicies, cert-manager Helm release, ESO Helm release, the ClusterIssuers) were created via `kubectl`/`helm`, not Terraform. They disappear with the cluster — no separate teardown needed.
+
+---
+
+# 11. Troubleshooting Cheatsheet
 
 | Symptom | First check | Likely cause |
 |---|---|---|
@@ -613,7 +716,7 @@ kubectl get lease -n kube-system plndr-cp-lock -o yaml
 
 ---
 
-# 11. Variable Reference
+# 12. Variable Reference
 
 ## Required environment variables before `deploy.sh`
 
