@@ -131,9 +131,12 @@ $(generate_kubevip_manifest "${CONTROL_PLANE_VIP}" "${vip_iface}")
 KVEOF
     "
 
-    # Cilium HelmChartConfig
+    # Cilium HelmChartConfig — point k8sServiceHost at this init master's
+    # direct IP, not the VIP. kube-vip can't bind the VIP until it has API
+    # access (chicken-and-egg with Cilium kube-proxy replacement), so Cilium
+    # must reach the apiserver via a directly-routable address.
     local cilium_config="${CONFIGS_DIR}/rke2-cilium-config.yaml"
-    sed "s/CONTROL_PLANE_VIP_PLACEHOLDER/${CONTROL_PLANE_VIP}/g" "$cilium_config" > /tmp/cilium-patched.yaml
+    sed "s/CONTROL_PLANE_VIP_PLACEHOLDER/${node_ip}/g" "$cilium_config" > /tmp/cilium-patched.yaml
     scp_file /tmp/cilium-patched.yaml "$node_ip" "/tmp/rke2-cilium-config.yaml"
     ssh_exec "$node_ip" "
       sudo mv /tmp/rke2-cilium-config.yaml /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
@@ -194,8 +197,10 @@ retrieve_kubeconfig() {
   local node_ip="$1"
   log "Saving kubeconfig → ${SECRETS_DIR}/kubeconfig-admin.yaml"
   mkdir -p "${SECRETS_DIR}"
+  # Use the init master's direct IP, not the VIP — kube-vip can fail to advertise
+  # during bootstrap, leaving the VIP unreachable. Direct IP always works.
   ssh_exec "$node_ip" "sudo cat /etc/rancher/rke2/rke2.yaml" | \
-    sed "s/127.0.0.1/${CONTROL_PLANE_VIP}/g" > "${SECRETS_DIR}/kubeconfig-admin.yaml"
+    sed "s/127.0.0.1/${node_ip}/g" > "${SECRETS_DIR}/kubeconfig-admin.yaml"
   chmod 600 "${SECRETS_DIR}/kubeconfig-admin.yaml"
 }
 
@@ -308,11 +313,11 @@ main() {
 
   mkdir -p "${SECRETS_DIR}"
 
-  mapfile -t MASTER_LINES < <(grep -A100 '^\[masters\]' "$INVENTORY" | tail -n +2 | grep -v '^\[' | grep -v '^$')
+  mapfile -t MASTER_LINES < <(awk '/^\[masters\]/{f=1; next} /^\[/{f=0} f && NF && $0 ~ /ansible_host=/' "$INVENTORY")
 
   local idx=0
   for line in "${MASTER_LINES[@]}"; do
-    [[ -z "$line" || "$line" =~ ^\[ ]] && break
+    [[ -z "$line" ]] && continue
 
     local node_ip is_init config_file
     node_ip=$(echo "$line"    | grep -oP 'ansible_host=\K[^ ]+')
