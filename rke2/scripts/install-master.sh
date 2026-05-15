@@ -143,6 +143,24 @@ KVEOF
       sudo chmod 600 /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
     "
     rm -f /tmp/cilium-patched.yaml
+
+    # CoreDNS HelmChartConfig — inject a `hosts` plugin so the bare
+    # hostname `kubernetes` resolves to a master IP. kube-vip v0.7.2
+    # hardcodes its apiserver URL as `https://kubernetes:6443`, and
+    # CoreDNS won't resolve the bare name out of the box.
+    local coredns_config="${CONFIGS_DIR}/rke2-coredns-config.yaml"
+    local hosts_block
+    hosts_block=$(printf '              %s kubernetes\n' \
+      $(awk '/^\[masters\]/{f=1; next} /^\[/{f=0} f' "$INVENTORY" \
+        | grep -oP 'ansible_host=\K[^ ]+'))
+    awk -v block="$hosts_block" '/MASTER_IPS_PLACEHOLDER/{print block; next} {print}' \
+      "$coredns_config" > /tmp/coredns-patched.yaml
+    scp_file /tmp/coredns-patched.yaml "$node_ip" "/tmp/rke2-coredns-config.yaml"
+    ssh_exec "$node_ip" "
+      sudo mv /tmp/rke2-coredns-config.yaml /var/lib/rancher/rke2/server/manifests/rke2-coredns-config.yaml
+      sudo chmod 600 /var/lib/rancher/rke2/server/manifests/rke2-coredns-config.yaml
+    "
+    rm -f /tmp/coredns-patched.yaml
   else
     log "[4/7] Non-init master — skipping manifest deploy"
   fi
@@ -279,10 +297,14 @@ spec:
               value: "true"
             - name: cp_namespace
               value: kube-system
+            # svc_enable / lb_enable are intentionally OFF: kube-vip's IPVS
+            # service LB requires IPVS kernel modules and duplicates Cilium's
+            # eBPF-based kube-proxy replacement (which already handles
+            # LoadBalancer services). We only need the control-plane VIP.
             - name: svc_enable
-              value: "true"
+              value: "false"
             - name: lb_enable
-              value: "true"
+              value: "false"
           securityContext:
             capabilities:
               add: [NET_ADMIN, NET_RAW]
@@ -290,6 +312,12 @@ spec:
             - mountPath: /etc/kubernetes/admin.conf
               name: kubeconfig
       hostNetwork: true
+      # kube-vip v0.7.2 hardcodes the apiserver URL to "https://kubernetes:<port>".
+      # With hostNetwork=true, default dnsPolicy=ClusterFirst falls back to host
+      # /etc/resolv.conf, which can't resolve "kubernetes". ClusterFirstWithHostNet
+      # routes DNS through CoreDNS so the rewrite/hosts override (see
+      # rke2-coredns-config.yaml HelmChartConfig) can answer.
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: kube-vip
       tolerations:
         - effect: NoSchedule
