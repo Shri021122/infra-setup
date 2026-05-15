@@ -53,18 +53,25 @@ install_alloy() {
 
   local ssh_opts="-o StrictHostKeyChecking=no -o ConnectTimeout=30 -i ${ssh_key}"
 
-  ssh_exec()  { ssh  ${ssh_opts} "${ssh_user}@${node_ip}" "$@"; }
+  ssh_exec()  { ssh -n ${ssh_opts} "${ssh_user}@${node_ip}" "$@"; }
   scp_file()  { scp  ${ssh_opts} "$1" "${ssh_user}@${node_ip}:$2"; }
 
   log "Installing Grafana Alloy ${ALLOY_VERSION} on ${node_ip} (role: ${node_role})"
 
+  # Skip if already installed and running
+  if ssh_exec "systemctl is-active alloy 2>/dev/null | grep -qw active"; then
+    log "✓ Alloy already active on ${node_ip} — skipping install"
+    return 0
+  fi
+
   # 1. Add Grafana APT repo and install Alloy
+  # The gpg.key is ASCII-armored; dearmor it for apt's signed-by= requirement.
   ssh_exec "
-    # Add Grafana apt repo
-    mkdir -p /etc/apt/keyrings
-    wget -q -O /etc/apt/keyrings/grafana.gpg https://apt.grafana.com/gpg.key
+    sudo mkdir -p /etc/apt/keyrings
+    sudo rm -f /etc/apt/keyrings/grafana.gpg
+    wget -qO- https://apt.grafana.com/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/grafana.gpg
     echo 'deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main' \
-      | sudo tee /etc/apt/sources.list.d/grafana.list
+      | sudo tee /etc/apt/sources.list.d/grafana.list >/dev/null
 
     sudo apt-get update -qq
     sudo apt-get install -y alloy
