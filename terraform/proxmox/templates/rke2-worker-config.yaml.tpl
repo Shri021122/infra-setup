@@ -25,3 +25,7 @@ kubelet-arg:
 node-label:
   - "node-role.kubernetes.io/worker=true"
   - "cluster=${cluster_name}"
+
+# Cilium replaces kube-proxy via eBPF; stop the agent from also
+# deploying RKE2's static-pod kube-proxy (matches master config).
+disable-kube-proxy: true

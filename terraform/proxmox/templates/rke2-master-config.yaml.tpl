@@ -87,6 +87,11 @@ kubelet-arg:
 disable:
   - rke2-ingress-nginx    # Disabled — Cilium IngressController is used instead (rke2-cilium-config.yaml)
 
+# Cilium replaces kube-proxy via eBPF (kubeProxyReplacement=true in
+# rke2-cilium-config.yaml). Stop RKE2 from also deploying its static-pod
+# kube-proxy — otherwise both data planes run in parallel.
+disable-kube-proxy: true
+
 # Write kubeconfig to a well-known location
 write-kubeconfig-mode: "0640"
 
