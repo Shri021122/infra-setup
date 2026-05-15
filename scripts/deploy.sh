@@ -115,13 +115,13 @@ check_prerequisites() {
   [[ -f "${TERRAFORM_OBS}/terraform.tfvars" ]] || \
     err "Missing observability terraform.tfvars\n  cp ${TERRAFORM_OBS}/terraform.tfvars.example ${TERRAFORM_OBS}/terraform.tfvars\n  Then fill in your Mimir and Loki URLs."
 
-  # Check required env vars for sensitive values
-  local missing_vars=()
-  [[ -n "${TF_VAR_proxmox_password:-}" ]]      || missing_vars+=("TF_VAR_proxmox_password")
+  # Proxmox auth: accept either the api_token (preferred) or the password.
+  if [[ -z "${TF_VAR_proxmox_api_token:-}" && -z "${TF_VAR_proxmox_password:-}" ]]; then
+    err "Missing Proxmox credentials. Export one of:\n  export TF_VAR_proxmox_api_token='user@realm!tokenid=UUID'   # preferred\n  export TF_VAR_proxmox_password='...'"
+  fi
+
   [[ -n "${TF_VAR_central_mimir_password:-}" ]] || warn "TF_VAR_central_mimir_password not set (Mimir auth will be empty)"
   [[ -n "${TF_VAR_central_loki_password:-}" ]]  || warn "TF_VAR_central_loki_password not set (Loki auth will be empty)"
-
-  [[ ${#missing_vars[@]} -eq 0 ]] || err "Missing required env vars:\n$(printf '  export %s=...\n' "${missing_vars[@]}")"
 
   success "All prerequisites satisfied"
 }
