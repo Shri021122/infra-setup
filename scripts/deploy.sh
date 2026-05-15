@@ -97,9 +97,21 @@ check_prerequisites() {
   for tool in terraform kubectl helm openssl ssh jq curl; do
     if ! command -v "$tool" &>/dev/null; then
       missing+=("$tool")
-    else
-      log "  ✓ $tool $(${tool} version 2>/dev/null | head -1 || echo '')"
+      continue
     fi
+    # Different tools use different version flags; ssh's `ssh version` would
+    # try to connect to a host literally named "version" and prompt for a
+    # password. Use `-V` (which writes to stderr) for ssh, and a per-tool
+    # invocation everywhere else.
+    local ver
+    case "$tool" in
+      ssh)        ver=$(ssh -V 2>&1 | head -1) ;;
+      curl)       ver=$(curl --version 2>/dev/null | head -1) ;;
+      jq)         ver=$(jq --version 2>/dev/null | head -1) ;;
+      openssl)    ver=$(openssl version 2>/dev/null | head -1) ;;
+      *)          ver=$(${tool} version 2>/dev/null | head -1) ;;
+    esac
+    log "  ✓ $tool ${ver}"
   done
 
   [[ ${#missing[@]} -eq 0 ]] || err "Missing tools: ${missing[*]}\nInstall them then re-run."
