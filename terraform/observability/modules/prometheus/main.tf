@@ -13,19 +13,18 @@ terraform {
   }
 }
 
-resource "kubernetes_namespace" "monitoring" {
+# The `monitoring` namespace is created in Phase 4 by
+# rbac/00-namespace-setup.yaml (with the same `privileged` PSS labels
+# Prometheus needs for host-level access). Phase 5 only deploys the
+# Helm release into it.
+data "kubernetes_namespace" "monitoring" {
   metadata {
     name = var.namespace
-    labels = {
-      "pod-security.kubernetes.io/enforce"         = "privileged"
-      "pod-security.kubernetes.io/enforce-version" = "latest"
-      "app.kubernetes.io/managed-by"               = "terraform"
-    }
   }
 }
 
 resource "helm_release" "kube_prometheus_stack" {
-  depends_on = [kubernetes_namespace.monitoring]
+  depends_on = [data.kubernetes_namespace.monitoring]
 
   name             = "kube-prometheus-stack"
   repository       = "https://prometheus-community.github.io/helm-charts"
