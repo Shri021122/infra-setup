@@ -153,7 +153,10 @@ KVEOF
     hosts_block=$(printf '              %s kubernetes\n' \
       $(awk '/^\[masters\]/{f=1; next} /^\[/{f=0} f' "$INVENTORY" \
         | grep -oP 'ansible_host=\K[^ ]+'))
-    awk -v block="$hosts_block" '/MASTER_IPS_PLACEHOLDER/{print block; next} {print}' \
+    # Anchored: only the line that is exactly the placeholder gets replaced
+    # (any other mention of the token in comments must be left alone, or
+    # the YAML breaks and RKE2's manifest auto-apply silently rejects it).
+    awk -v block="$hosts_block" '/^MASTER_IPS_PLACEHOLDER$/{print block; next} {print}' \
       "$coredns_config" > /tmp/coredns-patched.yaml
     scp_file /tmp/coredns-patched.yaml "$node_ip" "/tmp/rke2-coredns-config.yaml"
     ssh_exec "$node_ip" "

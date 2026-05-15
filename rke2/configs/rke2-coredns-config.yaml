@@ -15,7 +15,7 @@
 #   master, and the apiserver TLS cert SAN includes DNS:kubernetes, so
 #   `https://kubernetes:6443` connects and validates cleanly.
 #
-# The MASTER_IPS_PLACEHOLDER token is rewritten by install-master.sh with
+# The placeholder line below is rewritten by install-master.sh with
 # one "<ip> kubernetes" line per master.
 ################################################################################
 apiVersion: helm.cattle.io/v1
