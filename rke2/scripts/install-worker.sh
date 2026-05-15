@@ -18,13 +18,21 @@ INVENTORY="${CONFIGS_DIR}/inventory.ini"
 SSH_USER=$(grep 'ansible_user=' "$INVENTORY" | head -1 | cut -d= -f2)
 SSH_KEY=$(grep 'ansible_ssh_private_key_file=' "$INVENTORY" | head -1 | cut -d= -f2 | tr -d '"')
 CONTROL_PLANE_VIP=$(grep 'control_plane_vip=' "$INVENTORY" | head -1 | cut -d= -f2)
+INIT_MASTER_IP=$(awk '/^\[masters\]/{f=1; next} /^\[/{f=0} f && /is_init_node=true/' "$INVENTORY" | grep -oP 'ansible_host=\K[^ ]+' | head -1)
 RKE2_VERSION=$(grep 'rke2_version=' "$INVENTORY" | head -1 | cut -d= -f2)
 CLUSTER_TOKEN=$(cat "${SECRETS_DIR}/rke2-cluster-token")
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=30 -i ${SSH_KEY}"
 
-ssh_exec() { ssh ${SSH_OPTS} "${SSH_USER}@$1" "${@:2}"; }
+ssh_exec() { ssh -n ${SSH_OPTS} "${SSH_USER}@$1" "${@:2}"; }
 scp_file() { scp ${SSH_OPTS} "$1" "${SSH_USER}@$2:$3"; }
+
+worker_is_ready() {
+  local node_ip="$1"
+  ssh -n ${SSH_OPTS} "${SSH_USER}@${node_ip}" "
+    sudo systemctl is-active rke2-agent 2>/dev/null | grep -qw active
+  " 2>/dev/null
+}
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 err() { echo "[ERROR] $*" >&2; exit 1; }
 
@@ -35,28 +43,46 @@ install_worker() {
 
   [[ -f "$config_file" ]] || err "Config not found: ${config_file}"
 
+  if worker_is_ready "$node_ip"; then
+    log "✓ Worker ${node_ip} already has active rke2-agent — skipping install"
+    return 0
+  fi
+
   log "Installing RKE2 agent on worker ${node_ip}..."
 
-  # Upload config
+  # Upload config (patched: join via init master direct IP, not VIP;
+  # strip kubernetes.io/* self-labels which kubelet's NodeRestriction blocks)
+  local patched_config="/tmp/rke2-worker-patched-$$.yaml"
+  sed -e "s|https://${CONTROL_PLANE_VIP}:9345|https://${INIT_MASTER_IP}:9345|" \
+      -e '/node-role\.kubernetes\.io\/worker/d' \
+      "$config_file" > "$patched_config"
   ssh_exec "$node_ip" "sudo mkdir -p /etc/rancher/rke2"
-  scp_file "$config_file" "$node_ip" "/tmp/rke2-config.yaml"
+  scp_file "$patched_config" "$node_ip" "/tmp/rke2-config.yaml"
+  rm -f "$patched_config"
   ssh_exec "$node_ip" "sudo mv /tmp/rke2-config.yaml /etc/rancher/rke2/config.yaml && sudo chmod 600 /etc/rancher/rke2/config.yaml"
 
-  # Set cluster token
-  ssh_exec "$node_ip" "echo '${CLUSTER_TOKEN}' | sudo tee /etc/rancher/rke2/token > /dev/null && sudo chmod 600 /etc/rancher/rke2/token"
+  # Stop any running rke2-agent so we don't fight an existing failed start
+  ssh_exec "$node_ip" "sudo systemctl stop rke2-agent 2>/dev/null || true"
+
+  # Inject token into config.yaml (RKE2 requires it there, not in a separate file)
+  ssh_exec "$node_ip" "
+    sudo sed -i '/^token:/d' /etc/rancher/rke2/config.yaml
+    echo 'token: ${CLUSTER_TOKEN}' | sudo tee -a /etc/rancher/rke2/config.yaml > /dev/null
+  "
 
   # Install RKE2 agent
   ssh_exec "$node_ip" "
     curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION='${RKE2_VERSION}' INSTALL_RKE2_TYPE='agent' sh -
   "
 
-  # Apply kernel settings required by kubelet protect-kernel-defaults
+  # Apply kernel settings required by kubelet protect-kernel-defaults.
+  # kubelet refuses to start unless these match its expected defaults.
   ssh_exec "$node_ip" "
-    sudo sysctl -w kernel.panic=10
-    sudo sysctl -w kernel.panic_on_oops=1
-    echo 'kernel.panic=10' | sudo tee -a /etc/sysctl.d/99-rke2.conf
-    echo 'kernel.panic_on_oops=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf
-    sudo sysctl --system
+    sudo sysctl -w kernel.panic=10 vm.overcommit_memory=1 vm.panic_on_oom=0 kernel.panic_on_oops=1
+    for kv in 'kernel.panic=10' 'kernel.panic_on_oops=1' 'vm.overcommit_memory=1' 'vm.panic_on_oom=0'; do
+      grep -qxF \"\$kv\" /etc/sysctl.d/99-rke2.conf 2>/dev/null || echo \"\$kv\" | sudo tee -a /etc/sysctl.d/99-rke2.conf >/dev/null
+    done
+    sudo sysctl --system >/dev/null
   "
 
   # Enable and start
@@ -82,6 +108,11 @@ install_worker() {
   done
 
   log "✓ Worker ${node_name} (${node_ip}) is Ready"
+
+  # Apply worker role label via kubectl (kubelet can't self-apply kubernetes.io/* labels)
+  kubectl --kubeconfig "$kubeconfig" label node "$node_name" \
+    node-role.kubernetes.io/worker=true --overwrite >/dev/null 2>&1 || true
+  log "  Labeled ${node_name} with node-role.kubernetes.io/worker=true"
 }
 
 main() {
