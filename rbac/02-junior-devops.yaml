@@ -89,31 +89,7 @@ subjects:
   - kind: Group
     name: junior-devops
     apiGroup: rbac.authorization.k8s.io
----
-# Restrict junior-devops from exec in production namespace
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: no-exec-production
-  namespace: production
-  labels:
-    rbac.rke2.io/managed: "true"
-rules:
-  # Explicit deny pattern: give only read in production
-  - apiGroups: [""]
-    resources: ["pods/exec", "pods/portforward", "pods/attach"]
-    verbs: []   # Empty verbs = no access (overrides cluster-level grant)
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: junior-devops-no-exec-prod
-  namespace: production
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: no-exec-production
-subjects:
-  - kind: Group
-    name: junior-devops
-    apiGroup: rbac.authorization.k8s.io
+# NOTE: junior-devops is denied pods/exec in production by *not* granting it
+# in the cluster-level ClusterRole above. Kubernetes RBAC is purely additive
+# — there is no Role-based deny mechanism, so a Role with empty verbs is
+# rejected by the API server.

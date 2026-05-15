@@ -20,6 +20,13 @@ ADMIN_KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
 mkdir -p "$KUBECONFIGS_DIR" "$SECRETS_DIR/certs"
 chmod 700 "$KUBECONFIGS_DIR" "$SECRETS_DIR/certs"
 
+# SSH key for reaching master — read from inventory so it matches what
+# cloud-init actually injected into the VM (the tfvars vm_ssh_public_key).
+INVENTORY="${SCRIPT_DIR}/../../rke2/configs/inventory.ini"
+SSH_KEY=$(grep 'ansible_ssh_private_key_file=' "$INVENTORY" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' | sed "s|^~|$HOME|")
+[[ -f "$SSH_KEY" ]] || SSH_KEY="$HOME/.ssh/rke2_cluster_id"
+SSH_OPTS="-o StrictHostKeyChecking=no -o BatchMode=yes -i ${SSH_KEY}"
+
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 # Get API server URL from admin kubeconfig
@@ -58,8 +65,8 @@ create_user_kubeconfig() {
   log "  Signing certificate via cluster CA on ${master_ip}..."
 
   # Upload CSR to master and sign it
-  scp -o StrictHostKeyChecking=no "${cert_dir}/csr.pem" "ubuntu@${master_ip}:/tmp/${username}-csr.pem"
-  ssh -o StrictHostKeyChecking=no "ubuntu@${master_ip}" "
+  scp ${SSH_OPTS} "${cert_dir}/csr.pem" "ubuntu@${master_ip}:/tmp/${username}-csr.pem"
+  ssh ${SSH_OPTS} "ubuntu@${master_ip}" "
     sudo openssl x509 -req \
       -in /tmp/${username}-csr.pem \
       -CA /var/lib/rancher/rke2/server/tls/client-ca.crt \
@@ -68,8 +75,8 @@ create_user_kubeconfig() {
       -out /tmp/${username}-cert.pem \
       -days ${expiry_days} \
       -extensions v3_req 2>/dev/null
-    cat /tmp/${username}-cert.pem
-    rm -f /tmp/${username}-csr.pem /tmp/${username}-cert.pem
+    sudo cat /tmp/${username}-cert.pem
+    sudo rm -f /tmp/${username}-csr.pem /tmp/${username}-cert.pem
   " > "${cert_dir}/cert.pem"
 
   # Encode credentials as base64
