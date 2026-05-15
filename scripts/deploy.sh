@@ -103,13 +103,18 @@ check_prerequisites() {
     # try to connect to a host literally named "version" and prompt for a
     # password. Use `-V` (which writes to stderr) for ssh, and a per-tool
     # invocation everywhere else.
+    # `|| true` because some tools exit non-zero on the version query
+    # (e.g. `kubectl version` without --client tries to reach the apiserver,
+    # which hasn't been built yet on a fresh deploy). With `set -euo pipefail`
+    # any non-zero would otherwise kill the whole script here.
     local ver
     case "$tool" in
-      ssh)        ver=$(ssh -V 2>&1 | head -1) ;;
-      curl)       ver=$(curl --version 2>/dev/null | head -1) ;;
-      jq)         ver=$(jq --version 2>/dev/null | head -1) ;;
-      openssl)    ver=$(openssl version 2>/dev/null | head -1) ;;
-      *)          ver=$(${tool} version 2>/dev/null | head -1) ;;
+      ssh)        ver=$(ssh -V 2>&1 | head -1 || true) ;;
+      curl)       ver=$(curl --version 2>/dev/null | head -1 || true) ;;
+      jq)         ver=$(jq --version 2>/dev/null | head -1 || true) ;;
+      openssl)    ver=$(openssl version 2>/dev/null | head -1 || true) ;;
+      kubectl)    ver=$(kubectl version --client 2>/dev/null | head -1 || true) ;;
+      *)          ver=$(${tool} version 2>/dev/null | head -1 || true) ;;
     esac
     log "  ✓ $tool ${ver}"
   done
