@@ -179,12 +179,18 @@ ssh root@YOUR_PROXMOX_IP
 
 # Create user and role
 pveum user add terraform@pve
+
+# IMPORTANT: this exact privilege set has been validated end-to-end. Earlier
+# drafts of this runbook were missing Datastore.Allocate, Datastore.AllocateTemplate,
+# and Sys.Audit — without them `terraform apply` fails with 403s on storage
+# operations or "permission denied on /nodes/<node>" when querying the API.
 pveum role add TerraformRole -privs \
   "VM.Allocate VM.Clone VM.Config.CDROM VM.Config.CPU \
    VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType \
    VM.Config.Memory VM.Config.Network VM.Config.Options \
    VM.Monitor VM.Audit VM.PowerMgmt \
-   Datastore.AllocateSpace Datastore.Audit SDN.Use"
+   Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate \
+   Datastore.Audit SDN.Use Sys.Audit"
 
 pveum aclmod / -user terraform@pve -role TerraformRole
 
@@ -198,9 +204,47 @@ pveum user token add terraform@pve terraform --expire 0 --privsep=0
 
 > **Important:** The token secret is shown only once. Copy it immediately.
 >
-> `--privsep=0` makes the token inherit the user's privileges (simplest). If
-> you'd rather scope it tighter, omit that flag and grant role to the token
-> ACL: `pveum aclmod / -token 'terraform@pve!terraform' -role TerraformRole`.
+> `--privsep=0` makes the token inherit the user's privileges (simplest, and
+> what this runbook is validated against). If you'd rather scope the token
+> tighter, omit that flag (default `--privsep=1`) AND grant the role to the
+> token's own ACL explicitly:
+> ```bash
+> pveum aclmod / -token 'terraform@pve!terraform' -role TerraformRole -propagate 1
+> ```
+> Without that extra line, a `privsep=1` token has NO privileges regardless of
+> what the user has.
+
+### If you already created the token with the old privilege list, patch it
+
+```bash
+# Add the missing privileges in place — no need to recreate the role/token.
+pveum role modify TerraformRole -privs \
+  "VM.Allocate VM.Clone VM.Config.CDROM VM.Config.CPU \
+   VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType \
+   VM.Config.Memory VM.Config.Network VM.Config.Options \
+   VM.Monitor VM.Audit VM.PowerMgmt \
+   Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate \
+   Datastore.Audit SDN.Use Sys.Audit"
+
+# Verify
+pveum role list | grep -A1 TerraformRole
+pveum acl list | grep terraform
+```
+
+### Verify the token actually works before moving on
+
+From your workstation (after Phase 2.3 has you `export TF_VAR_proxmox_api_token=…`):
+
+```bash
+# Should return the snippets list (or "[]" if no snippets yet) — NOT 401/403.
+curl -sk \
+  -H "Authorization: PVEAPIToken=${TF_VAR_proxmox_api_token}" \
+  "https://YOUR_PROXMOX_IP:8006/api2/json/nodes/YOUR_NODE/storage/local/content?content=snippets" \
+  | head -c 200 ; echo
+```
+
+If you get `{"data": [...]}` you're good. If you get `permission check failed`,
+re-run the `pveum role modify` block above.
 
 You'll export the full token string as **`TF_VAR_proxmox_api_token`** before
 running `deploy.sh` (see Phase 2.3). Do **not** use the `TF_VAR_proxmox_password`

@@ -208,10 +208,13 @@ pveum user add terraform@pve
 pveum role add TerraformRole -privs "VM.Allocate VM.Clone VM.Config.CDROM \
   VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType \
   VM.Config.Memory VM.Config.Network VM.Config.Options VM.Monitor VM.Audit \
-  VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
+  VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate \
+  Datastore.Audit SDN.Use Sys.Audit"
 pveum aclmod / -user terraform@pve -role TerraformRole
-pveum user token add terraform@pve terraform --expire 0
+pveum user token add terraform@pve terraform --expire 0 --privsep=0
 # → save the token UUID; you'll export it as TF_VAR_proxmox_api_token
+# (--privsep=0 makes the token inherit the user's privileges; without it,
+#  also run: pveum aclmod / -token 'terraform@pve!terraform' -role TerraformRole -propagate 1)
 
 # Ubuntu 22.04 cloud-init template (this repo's defaults expect VM ID 9200)
 wget -q https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img

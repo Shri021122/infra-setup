@@ -17,10 +17,10 @@ Install on your workstation:
 ```bash
 # On Proxmox host (as root):
 pveum user add terraform@pve
-pveum role add TerraformRole -privs "VM.Allocate VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Monitor VM.Audit VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
+pveum role add TerraformRole -privs "VM.Allocate VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Monitor VM.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use Sys.Audit"
 pveum aclmod / -user terraform@pve -role TerraformRole
-pveum user token add terraform@pve terraform --expire 0
-# Save the token value — you'll need it
+pveum user token add terraform@pve terraform --expire 0 --privsep=0
+# Save the full token string: terraform@pve!terraform=<UUID> — export as TF_VAR_proxmox_api_token
 ```
 
 ### 1.2 Create Ubuntu 22.04 Cloud-Init Template
