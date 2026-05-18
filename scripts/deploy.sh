@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
 ################################################################################
-# deploy.sh — Full Automated Deployment: Phases 2–7
+# deploy.sh — Full Automated Deployment: Phases 2–7 (multi-cluster aware)
 #
 # Usage:
-#   ./scripts/deploy.sh                   # Full deployment
-#   ./scripts/deploy.sh --from phase3     # Resume from a specific phase
-#   ./scripts/deploy.sh --only phase4     # Run a single phase
-#   ./scripts/deploy.sh --dry-run         # Validate without applying
+#   ./scripts/deploy.sh <cluster-name>                # Full deployment
+#   ./scripts/deploy.sh <cluster-name> --from phase3  # Resume from a phase
+#   ./scripts/deploy.sh <cluster-name> --only phase4  # Run a single phase
+#   ./scripts/deploy.sh <cluster-name> --dry-run      # Validate without applying
 #
-# Prerequisites (Phase 1 — manual):
+# <cluster-name> must match a directory under clusters/. Each cluster has its
+# own tfvars (clusters/<name>/*.tfvars), tfstate (clusters/<name>/tfstate/),
+# and kubeconfig (clusters/<name>/kubeconfig.yaml). Terraform CODE under
+# terraform/ is shared — no per-cluster copies.
+#
+# Prerequisites (Phase 1 — manual, once per Proxmox host):
 #   - Proxmox API token created
-#   - Ubuntu 22.04 cloud-init template created
-#   - terraform.tfvars files filled in (see *.tfvars.example files)
-#     (terraform/argocd/terraform.tfvars is optional — see Phase 7 below)
-#   - SSH key for VM access available
+#   - Ubuntu cloud-init template created
+#   - snippets/k8s-common.yaml uploaded to local:snippets/ on Proxmox
+#
+# Prerequisites (once per cluster, before this script):
+#   - clusters/<cluster-name>/proxmox.tfvars filled in (or use new-cluster.sh)
+#   - clusters/<cluster-name>/observability.tfvars filled in
+#   - clusters/<cluster-name>/argocd.tfvars filled in (optional — Phase 7 skips
+#     cleanly if absent)
+#   - Env: TF_VAR_proxmox_api_token, TF_VAR_central_mimir_password (optional),
+#          TF_VAR_central_loki_password (optional)
 #
 # Phase 2: Terraform → Proxmox VMs
-# Phase 3: RKE2 cluster installation (masters → workers)
-#          Cilium config includes L2 announcements + LB IPAM (flags enabled,
-#          pool itself is created in Phase 7).
+# Phase 3: RKE2 cluster installation (masters → workers) + Alloy on every node
 # Phase 4: Security (namespaces, RBAC, NetworkPolicies, cert-manager, ESO, kubeconfigs)
-# Phase 5: Observability (Prometheus + Alertmanager via Terraform; Alloy already on VMs)
+# Phase 5: Observability (Prometheus + Alertmanager via Terraform)
 # Phase 6: Verify Cilium IngressController (deployed by RKE2 automatically)
 # Phase 7: ArgoCD via Terraform + optional Ingress (LB IP pool + L2 policy + cert)
 ################################################################################
@@ -37,11 +46,18 @@ TERRAFORM_ARGOCD="${ROOT_DIR}/terraform/argocd"
 RKE2_SCRIPTS="${ROOT_DIR}/rke2/scripts"
 RBAC_DIR="${ROOT_DIR}/rbac"
 SECURITY_DIR="${ROOT_DIR}/security"
+CLUSTERS_DIR="${ROOT_DIR}/clusters"
 LOG_DIR="${ROOT_DIR}/.logs"
-LOG_FILE="${LOG_DIR}/deploy-$(date +%Y%m%d-%H%M%S).log"
 
 mkdir -p "$SECRETS_DIR" "$LOG_DIR"
 chmod 700 "$SECRETS_DIR"
+
+# Per-cluster paths (populated after argument parsing once we know the name).
+CLUSTER_NAME=""
+CLUSTER_DIR=""
+CLUSTER_TFSTATE_DIR=""
+CLUSTER_KUBECONFIG=""
+LOG_FILE=""
 
 # ─── Colors & logging ─────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -60,18 +76,80 @@ START_PHASE=2
 END_PHASE=7
 DRY_RUN=false
 
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <cluster-name> [options]
+
+Arguments:
+  <cluster-name>    Must match a directory under clusters/
+
+Options:
+  --from phaseN     Resume from this phase (2-7)
+  --only phaseN     Run only this phase
+  --dry-run         Validate inputs; don't apply anything
+  -h, --help        Show this help
+
+Examples:
+  $(basename "$0") test-prod
+  $(basename "$0") acme-prod --from phase4
+  $(basename "$0") widgets-prod --only phase7
+EOF
+  exit "${1:-0}"
+}
+
+# --help / -h works without a cluster name.
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && usage 0
+
+# First positional arg = cluster name. Anything starting with -- is a flag.
+if [[ $# -eq 0 ]] || [[ "$1" =~ ^- ]]; then
+  echo "ERROR: cluster name is required (positional, first arg)." >&2
+  usage 1
+fi
+CLUSTER_NAME="$1"; shift
+
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --from)
-      START_PHASE="${2//phase/}"; shift 2 ;;
-    --only)
-      p="${2//phase/}"; START_PHASE="$p"; END_PHASE="$p"; shift 2 ;;
-    --dry-run)
-      DRY_RUN=true; shift ;;
-    *)
-      echo "Unknown argument: $1"; exit 1 ;;
+    --from)     START_PHASE="${2//phase/}"; shift 2 ;;
+    --only)     p="${2//phase/}"; START_PHASE="$p"; END_PHASE="$p"; shift 2 ;;
+    --dry-run)  DRY_RUN=true; shift ;;
+    -h|--help)  usage 0 ;;
+    *)          echo "Unknown argument: $1"; usage 1 ;;
   esac
 done
+
+# Resolve per-cluster paths.
+CLUSTER_DIR="${CLUSTERS_DIR}/${CLUSTER_NAME}"
+CLUSTER_TFSTATE_DIR="${CLUSTER_DIR}/tfstate"
+CLUSTER_KUBECONFIG="${CLUSTER_DIR}/kubeconfig.yaml"
+LOG_FILE="${LOG_DIR}/deploy-${CLUSTER_NAME}-$(date +%Y%m%d-%H%M%S).log"
+
+# Validate cluster directory exists with required tfvars files.
+# If it doesn't, offer to run the wizard right now (interactive only).
+if [[ ! -d "$CLUSTER_DIR" ]]; then
+  echo ""
+  echo "clusters/${CLUSTER_NAME}/ does not exist yet."
+  if [[ -t 0 ]]; then
+    read -r -p "Run the new-cluster wizard now? [Y/n]: " reply
+    if [[ -z "$reply" || "$reply" =~ ^[Yy] ]]; then
+      "${SCRIPT_DIR}/new-cluster.sh" "$CLUSTER_NAME"
+    else
+      echo "Aborting. Run when you're ready: ./scripts/new-cluster.sh ${CLUSTER_NAME}"
+      exit 1
+    fi
+  else
+    echo "ERROR: not running interactively. Create the cluster first:" >&2
+    echo "  ./scripts/new-cluster.sh ${CLUSTER_NAME}" >&2
+    exit 1
+  fi
+fi
+for f in proxmox.tfvars observability.tfvars; do
+  [[ -f "${CLUSTER_DIR}/${f}" ]] || {
+    echo "ERROR: ${CLUSTER_DIR}/${f} not found." >&2
+    exit 1
+  }
+done
+
+mkdir -p "$CLUSTER_TFSTATE_DIR"
 
 should_run() {
   local phase_num="$1"
@@ -92,6 +170,34 @@ run_visible() {
     return
   fi
   "$@" 2>&1 | tee -a "$LOG_FILE" || { err "Command failed: $*\nCheck log: $LOG_FILE"; }
+}
+
+# tf — wrapper around `terraform` that injects -var-file + -state for the
+# current cluster automatically. Pass the module short-name as $1 (proxmox /
+# observability / argocd), the action as $2 (init / validate / plan / apply /
+# output / destroy / ...) and the rest as terraform args.
+#
+# Plan/apply/destroy/output/state commands get the per-cluster state path.
+# init/validate don't take a state arg.
+tf() {
+  local module="$1"; shift
+  local action="$1"; shift
+  local module_dir="${ROOT_DIR}/terraform/${module}"
+  local var_file="${CLUSTER_DIR}/${module}.tfvars"
+  local state_file="${CLUSTER_TFSTATE_DIR}/${module}.tfstate"
+
+  cd "$module_dir"
+
+  case "$action" in
+    init|validate|fmt|providers|version)
+      terraform "$action" "$@" ;;
+    plan|apply|destroy|refresh|import|taint|untaint)
+      terraform "$action" -var-file="$var_file" -state="$state_file" "$@" ;;
+    output|state|show)
+      terraform "$action" -state="$state_file" "$@" ;;
+    *)
+      terraform "$action" "$@" ;;
+  esac
 }
 
 # ─── Prerequisite checks ──────────────────────────────────────────────────────
@@ -134,13 +240,15 @@ check_prerequisites() {
   [[ -f "${TERRAFORM_PROXMOX}/terraform.tfvars" ]] || \
     err "Missing terraform.tfvars\n  cp ${TERRAFORM_PROXMOX}/terraform.tfvars.example ${TERRAFORM_PROXMOX}/terraform.tfvars\n  Then fill in your values."
 
-  [[ -f "${TERRAFORM_OBS}/terraform.tfvars" ]] || \
-    err "Missing observability terraform.tfvars\n  cp ${TERRAFORM_OBS}/terraform.tfvars.example ${TERRAFORM_OBS}/terraform.tfvars\n  Then fill in your Mimir and Loki URLs."
+  # All tfvars now live under clusters/<name>/ — already validated at startup.
+  log "  Cluster:               ${CLUSTER_NAME}"
+  log "  Cluster directory:     ${CLUSTER_DIR}"
+  log "  Terraform state dir:   ${CLUSTER_TFSTATE_DIR}"
 
   # ArgoCD tfvars is optional — if absent we skip Phase 7 cleanly later.
-  if [[ ! -f "${TERRAFORM_ARGOCD}/terraform.tfvars" ]]; then
-    warn "No ${TERRAFORM_ARGOCD}/terraform.tfvars — Phase 7 (ArgoCD) will be skipped."
-    warn "  To enable: cp terraform.tfvars.example terraform.tfvars and edit."
+  if [[ ! -f "${CLUSTER_DIR}/argocd.tfvars" ]]; then
+    warn "No ${CLUSTER_DIR}/argocd.tfvars — Phase 7 (ArgoCD) will be skipped."
+    warn "  To enable: copy from clusters/_template/argocd.tfvars and edit."
   fi
 
   # Proxmox auth: accept either the api_token (preferred) or the password.
@@ -158,31 +266,35 @@ check_prerequisites() {
 phase2_terraform_proxmox() {
   phase "Phase 2: Terraform — Proxmox VM Provisioning"
 
-  cd "$TERRAFORM_PROXMOX"
+  local tfplan="${CLUSTER_TFSTATE_DIR}/proxmox.tfplan"
+  local var_file="${CLUSTER_DIR}/proxmox.tfvars"
+  local state_file="${CLUSTER_TFSTATE_DIR}/proxmox.tfstate"
 
   log "Initializing Terraform..."
-  run terraform init -upgrade
+  ( cd "$TERRAFORM_PROXMOX" && run terraform init -upgrade )
 
   log "Validating configuration..."
-  run terraform validate
+  ( cd "$TERRAFORM_PROXMOX" && run terraform validate )
 
   log "Planning infrastructure..."
-  run_visible terraform plan -out=cluster.tfplan
+  ( cd "$TERRAFORM_PROXMOX" && run_visible terraform plan \
+      -var-file="$var_file" -state="$state_file" -out="$tfplan" )
 
   log "Applying infrastructure (this creates VMs — may take 10–15 minutes)..."
-  run_visible terraform apply -auto-approve cluster.tfplan
+  ( cd "$TERRAFORM_PROXMOX" && run_visible terraform apply \
+      -state="$state_file" -auto-approve "$tfplan" )
 
   # Extract outputs for use in later phases
   log "Extracting Terraform outputs..."
-  terraform output -json > "${SECRETS_DIR}/tf-outputs.json"
-  INIT_MASTER_IP=$(terraform output -raw init_master_ip)
-  CONTROL_PLANE_VIP=$(terraform output -raw control_plane_vip)
+  ( cd "$TERRAFORM_PROXMOX" && terraform output -state="$state_file" -json > "${CLUSTER_DIR}/tf-outputs.json" )
+  INIT_MASTER_IP=$(  cd "$TERRAFORM_PROXMOX" && terraform output -state="$state_file" -raw init_master_ip )
+  CONTROL_PLANE_VIP=$(cd "$TERRAFORM_PROXMOX" && terraform output -state="$state_file" -raw control_plane_vip )
   log "  Init master IP:     ${INIT_MASTER_IP}"
   log "  Control plane VIP:  ${CONTROL_PLANE_VIP}"
 
   # Wait for VMs to be reachable via SSH
   log "Waiting for VMs to boot and cloud-init to complete..."
-  VM_IPS=$(terraform output -json all_node_ips | jq -r '.[]')
+  VM_IPS=$(cd "$TERRAFORM_PROXMOX" && terraform output -state="$state_file" -json all_node_ips | jq -r '.[]')
 
   # SSH user + key path come from inventory.ini (already generated by the
   # local_file resource above). Same source of truth the install-*.sh
@@ -230,11 +342,16 @@ phase3_rke2_install() {
   [[ -f "${SECRETS_DIR}/kubeconfig-admin.yaml" ]] || \
     err "Admin kubeconfig not found after master install. Check logs."
 
+  # Copy admin kubeconfig to the per-cluster location used by all later phases.
+  cp "${SECRETS_DIR}/kubeconfig-admin.yaml" "${CLUSTER_KUBECONFIG}"
+  chmod 600 "${CLUSTER_KUBECONFIG}"
+  log "Admin kubeconfig saved at: ${CLUSTER_KUBECONFIG}"
+
   log "Installing RKE2 agents on worker nodes..."
   run_visible "${RKE2_SCRIPTS}/install-worker.sh"
 
   # Set KUBECONFIG for subsequent phases
-  export KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
+  export KUBECONFIG="${CLUSTER_KUBECONFIG}"
 
   log "Verifying cluster health..."
   local retries=0
@@ -260,7 +377,7 @@ phase3_rke2_install() {
 phase4_security() {
   phase "Phase 4: Security — RBAC, Network Policies, Cert-Manager, ESO"
 
-  export KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
+  export KUBECONFIG="${CLUSTER_KUBECONFIG}"
 
   # 4a — Namespaces with Pod Security Standards
   log "4a. Creating namespaces with Pod Security Standards..."
@@ -335,8 +452,8 @@ phase4_security() {
   # 4f — Generate role-specific kubeconfigs
   log "4f. Generating role-specific kubeconfigs..."
   chmod +x "${RBAC_DIR}/scripts/generate-kubeconfigs.sh"
-  run_visible "${RBAC_DIR}/scripts/generate-kubeconfigs.sh"
-  success "  Kubeconfigs generated in rbac/kubeconfigs/"
+  run_visible "${RBAC_DIR}/scripts/generate-kubeconfigs.sh" "${CLUSTER_NAME}"
+  success "  Kubeconfigs generated in ${CLUSTER_DIR}/rbac-kubeconfigs/"
 
   success "Phase 4 complete — cluster is secured"
 }
@@ -345,7 +462,11 @@ phase4_security() {
 phase5_observability() {
   phase "Phase 5: Observability Stack (Prometheus + Alertmanager → central Mimir)"
 
-  export KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
+  export KUBECONFIG="${CLUSTER_KUBECONFIG}"
+
+  local tfplan="${CLUSTER_TFSTATE_DIR}/observability.tfplan"
+  local var_file="${CLUSTER_DIR}/observability.tfvars"
+  local state_file="${CLUSTER_TFSTATE_DIR}/observability.tfstate"
 
   # Add Helm repos
   log "Adding Helm repositories..."
@@ -363,11 +484,11 @@ phase5_observability() {
   run terraform validate
 
   log "Planning observability stack..."
-  run_visible terraform plan -out=obs.tfplan
+  run_visible terraform plan -var-file="$var_file" -state="$state_file" -out="$tfplan"
 
   log "Deploying observability stack (Prometheus + Alertmanager)..."
   log "  This may take 5–10 minutes..."
-  run_visible terraform apply -auto-approve obs.tfplan
+  run_visible terraform apply -state="$state_file" -auto-approve "$tfplan"
 
   cd "$ROOT_DIR"
 
@@ -379,7 +500,7 @@ phase5_observability() {
 
   # Display central Grafana instructions
   echo ""
-  terraform -chdir="$TERRAFORM_OBS" output central_grafana_datasource_instructions 2>/dev/null || true
+  terraform -chdir="$TERRAFORM_OBS" output -state="$state_file" central_grafana_datasource_instructions 2>/dev/null || true
   echo ""
 
   success "Phase 5 complete — metrics flowing to central Mimir, logs to central Loki"
@@ -389,7 +510,7 @@ phase5_observability() {
 phase6_cilium_ingress() {
   phase "Phase 6: Cilium IngressController Verification"
 
-  export KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
+  export KUBECONFIG="${CLUSTER_KUBECONFIG}"
 
   log "Verifying Cilium IngressController is deployed..."
 
@@ -460,13 +581,17 @@ EOF
 phase7_argocd() {
   phase "Phase 7: ArgoCD — GitOps Control Plane"
 
-  export KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
+  export KUBECONFIG="${CLUSTER_KUBECONFIG}"
+
+  local tfplan="${CLUSTER_TFSTATE_DIR}/argocd.tfplan"
+  local var_file="${CLUSTER_DIR}/argocd.tfvars"
+  local state_file="${CLUSTER_TFSTATE_DIR}/argocd.tfstate"
 
   # Optional phase: skip cleanly if the user hasn't filled in tfvars.
-  if [[ ! -f "${TERRAFORM_ARGOCD}/terraform.tfvars" ]]; then
-    warn "No ${TERRAFORM_ARGOCD}/terraform.tfvars — skipping Phase 7."
-    warn "  To enable later: cp terraform.tfvars.example terraform.tfvars, edit,"
-    warn "  then run: ./scripts/deploy.sh --only phase7"
+  if [[ ! -f "$var_file" ]]; then
+    warn "No ${var_file} — skipping Phase 7."
+    warn "  To enable later: copy clusters/_template/argocd.tfvars there, edit,"
+    warn "  then run: ./scripts/deploy.sh ${CLUSTER_NAME} --only phase7"
     return 0
   fi
 
@@ -479,12 +604,12 @@ phase7_argocd() {
   run terraform validate
 
   log "Planning ArgoCD stack..."
-  run_visible terraform plan -out=argocd.tfplan
+  run_visible terraform plan -var-file="$var_file" -state="$state_file" -out="$tfplan"
 
   log "Applying ArgoCD stack (creates argocd namespace + Helm release;"
   log "  optionally LB IP pool + L2 policy + Ingress if argocd_ingress_enabled=true)..."
   log "  This may take 3–5 minutes..."
-  run_visible terraform apply -auto-approve argocd.tfplan
+  run_visible terraform apply -state="$state_file" -auto-approve "$tfplan"
 
   cd "$ROOT_DIR"
 
@@ -504,9 +629,9 @@ phase7_argocd() {
 
   # Print day-1 access instructions from the module's output
   echo ""
-  terraform -chdir="$TERRAFORM_ARGOCD" output -raw argocd_access_instructions 2>/dev/null || true
+  terraform -chdir="$TERRAFORM_ARGOCD" output -state="$state_file" -raw argocd_access_instructions 2>/dev/null || true
   echo ""
-  terraform -chdir="$TERRAFORM_ARGOCD" output -raw argocd_ingress 2>/dev/null || true
+  terraform -chdir="$TERRAFORM_ARGOCD" output -state="$state_file" -raw argocd_ingress 2>/dev/null || true
   echo ""
 
   success "Phase 7 complete — ArgoCD is up. Rotate the admin password and delete"
@@ -515,9 +640,12 @@ phase7_argocd() {
 
 # ─── Final Summary ─────────────────────────────────────────────────────────────
 print_summary() {
-  phase "Deployment Complete"
+  phase "Deployment Complete — ${CLUSTER_NAME}"
 
-  export KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
+  export KUBECONFIG="${CLUSTER_KUBECONFIG}"
+
+  echo -e "${BOLD}Cluster:${NC} ${CLUSTER_NAME}"
+  echo ""
 
   echo -e "${BOLD}Cluster Status:${NC}"
   kubectl get nodes -o wide 2>/dev/null || true
@@ -534,8 +662,8 @@ print_summary() {
   echo ""
 
   echo -e "${BOLD}Access:${NC}"
-  echo -e "  Admin kubeconfig:  ${CYAN}${SECRETS_DIR}/kubeconfig-admin.yaml${NC}"
-  echo -e "  Role kubeconfigs:  ${CYAN}${ROOT_DIR}/rbac/kubeconfigs/${NC}"
+  echo -e "  Admin kubeconfig:  ${CYAN}${CLUSTER_KUBECONFIG}${NC}"
+  echo -e "  Role kubeconfigs:  ${CYAN}${CLUSTER_DIR}/rbac-kubeconfigs/${NC}"
   echo -e "  Deploy logs:       ${CYAN}${LOG_FILE}${NC}"
   echo ""
 
@@ -545,10 +673,10 @@ print_summary() {
   echo ""
 
   echo -e "${BOLD}Next steps:${NC}"
-  echo -e "  1. Add cluster label filter in your central Grafana: ${CYAN}cluster=\"rke2-prod\"${NC}"
+  echo -e "  1. Add cluster label filter in your central Grafana: ${CYAN}cluster=\"${CLUSTER_NAME}\"${NC}"
   echo -e "  2. Import dashboards: 7249 (cluster), 1860 (nodes), 3070 (etcd)"
-  echo -e "  3. Distribute role kubeconfigs to your team"
-  echo -e "  5. Configure ESO ClusterSecretStore with your Vault URL"
+  echo -e "  3. Distribute role kubeconfigs to your team (secure channel)"
+  echo -e "  4. Configure ESO ClusterSecretStore with your Vault URL"
   echo ""
   success "Deployment finished. Full log at: ${LOG_FILE}"
 }
@@ -560,8 +688,8 @@ main() {
   ╦═╗╦╔═╔═╗  ╔═╗╦  ╦ ╦╔═╗╔╦╗╔═╗╦═╗
   ╠╦╝╠╩╗║╣   ║  ║  ║ ║╚═╗ ║ ║╣ ╠╦╝
   ╩╚═╩ ╩╚═╝  ╚═╝╩═╝╚═╝╚═╝ ╩ ╚═╝╩╚═
-  Automated Deploy: Phases 2–7
 BANNER
+  echo -e "  ${BOLD}Cluster:${NC} ${CLUSTER_NAME}    ${BOLD}Phases:${NC} ${START_PHASE}–${END_PHASE}"
   echo -e "${NC}"
 
   log "Log file: ${LOG_FILE}"

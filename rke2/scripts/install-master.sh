@@ -136,7 +136,10 @@ KVEOF
     # access (chicken-and-egg with Cilium kube-proxy replacement), so Cilium
     # must reach the apiserver via a directly-routable address.
     local cilium_config="${CONFIGS_DIR}/rke2-cilium-config.yaml"
-    sed "s/CONTROL_PLANE_VIP_PLACEHOLDER/${node_ip}/g" "$cilium_config" > /tmp/cilium-patched.yaml
+    # Substitute both placeholders: VIP (per-node) + cluster name (per-cluster).
+    sed -e "s/CONTROL_PLANE_VIP_PLACEHOLDER/${node_ip}/g" \
+        -e "s/CLUSTER_NAME_PLACEHOLDER/${CLUSTER_NAME}/g" \
+        "$cilium_config" > /tmp/cilium-patched.yaml
     scp_file /tmp/cilium-patched.yaml "$node_ip" "/tmp/rke2-cilium-config.yaml"
     ssh_exec "$node_ip" "
       sudo mv /tmp/rke2-cilium-config.yaml /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml

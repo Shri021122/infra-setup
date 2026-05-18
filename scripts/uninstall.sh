@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 ################################################################################
-# uninstall.sh — Tear down everything deploy.sh created
+# uninstall.sh — Tear down everything deploy.sh created (multi-cluster aware)
+#
+# Operates on ONE cluster at a time. Each cluster's tfvars/tfstate live under
+# clusters/<cluster-name>/ — uninstall ONLY destroys that cluster's resources.
 #
 # Phases run in REVERSE of deploy.sh:
 #   Phase 7: terraform destroy → ArgoCD (Helm release, Ingress, LB pool, cert)
@@ -8,16 +11,16 @@
 #   Phase 4: helm uninstall → cert-manager, External Secrets Operator
 #            kubectl delete → RBAC, NetworkPolicies, namespaces
 #   Phase 3: rke2-uninstall.sh + Alloy removal on every node
-#   Phase 2: terraform destroy → Proxmox VMs
-#   Cleanup: remove .secrets, rbac/kubeconfigs, tfstate, *.tfplan, .logs
-#            (tfvars files are KEPT so the repo stays redeployable)
+#   Phase 2: terraform destroy → Proxmox VMs (just this cluster's)
+#   Cleanup: remove clusters/<name>/{tfstate/,kubeconfig.yaml,rbac-kubeconfigs/}
+#            (tfvars STAY so the repo stays redeployable)
 #
 # Usage:
-#   ./scripts/uninstall.sh                # Interactive, prompts before each phase
-#   ./scripts/uninstall.sh --only phase3  # Just uninstall RKE2 (keep VMs + tfstate)
-#   ./scripts/uninstall.sh --dry-run      # Show what would happen
-#   ./scripts/uninstall.sh --yes          # Skip all prompts (CI / scripted use)
-#   ./scripts/uninstall.sh --keep-local   # Skip the final local-artifact cleanup
+#   ./scripts/uninstall.sh <cluster-name>                # Interactive
+#   ./scripts/uninstall.sh <cluster-name> --only phase3  # Just RKE2 on the nodes
+#   ./scripts/uninstall.sh <cluster-name> --dry-run      # Show what would happen
+#   ./scripts/uninstall.sh <cluster-name> --yes          # Skip all prompts
+#   ./scripts/uninstall.sh <cluster-name> --keep-local   # Skip final cleanup
 ################################################################################
 
 set -euo pipefail
@@ -31,9 +34,16 @@ TERRAFORM_OBS="${ROOT_DIR}/terraform/observability"
 TERRAFORM_ARGOCD="${ROOT_DIR}/terraform/argocd"
 RBAC_DIR="${ROOT_DIR}/rbac"
 SECURITY_DIR="${ROOT_DIR}/security"
+CLUSTERS_DIR="${ROOT_DIR}/clusters"
 INVENTORY="${ROOT_DIR}/rke2/configs/inventory.ini"
 LOG_DIR="${ROOT_DIR}/.logs"
-LOG_FILE="${LOG_DIR}/uninstall-$(date +%Y%m%d-%H%M%S).log"
+
+# Per-cluster paths set after arg parsing.
+CLUSTER_NAME=""
+CLUSTER_DIR=""
+CLUSTER_TFSTATE_DIR=""
+CLUSTER_KUBECONFIG=""
+LOG_FILE=""
 
 mkdir -p "$LOG_DIR"
 
@@ -55,16 +65,31 @@ DRY_RUN=false
 ASSUME_YES=false
 KEEP_LOCAL=false
 
+# First positional arg = cluster name.
+if [[ $# -eq 0 ]] || [[ "$1" =~ ^- ]]; then
+  echo "ERROR: cluster name is required (positional, first arg)." >&2
+  sed -n '2,25p' "$0"; exit 1
+fi
+CLUSTER_NAME="$1"; shift
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --only)        ONLY_PHASE="${2//phase/}"; shift 2 ;;
     --dry-run)     DRY_RUN=true; shift ;;
     --yes|-y)      ASSUME_YES=true; shift ;;
     --keep-local)  KEEP_LOCAL=true; shift ;;
-    -h|--help)     sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,25p' "$0"; exit 0 ;;
     *)             echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
+
+# Resolve per-cluster paths.
+CLUSTER_DIR="${CLUSTERS_DIR}/${CLUSTER_NAME}"
+CLUSTER_TFSTATE_DIR="${CLUSTER_DIR}/tfstate"
+CLUSTER_KUBECONFIG="${CLUSTER_DIR}/kubeconfig.yaml"
+LOG_FILE="${LOG_DIR}/uninstall-${CLUSTER_NAME}-$(date +%Y%m%d-%H%M%S).log"
+
+[[ -d "$CLUSTER_DIR" ]] || { echo "ERROR: clusters/${CLUSTER_NAME}/ does not exist."; exit 1; }
 
 should_run() {
   local phase_num="$1"
@@ -138,15 +163,18 @@ ssh_exec() {
 
 # ─── Phase 7: ArgoCD ──────────────────────────────────────────────────────────
 phase7_destroy_argocd() {
-  phase "Phase 7: Destroy ArgoCD Stack (terraform)"
+  phase "Phase 7: Destroy ArgoCD Stack (terraform) — ${CLUSTER_NAME}"
 
-  if [[ ! -f "${TERRAFORM_ARGOCD}/terraform.tfstate" ]]; then
+  local var_file="${CLUSTER_DIR}/argocd.tfvars"
+  local state_file="${CLUSTER_TFSTATE_DIR}/argocd.tfstate"
+
+  if [[ ! -f "$state_file" ]]; then
     log "No ArgoCD tfstate found — nothing to destroy."
     return 0
   fi
 
   echo -e "${BOLD}This will:${NC}"
-  echo -e "  - terraform destroy in ${CYAN}${TERRAFORM_ARGOCD}${NC}"
+  echo -e "  - terraform destroy with state ${CYAN}${state_file}${NC}"
   echo -e "  - removes: argocd Helm release, Ingress, Certificate,"
   echo -e "    CiliumLoadBalancerIPPool, CiliumL2AnnouncementPolicy, argocd namespace"
   echo ""
@@ -158,12 +186,12 @@ phase7_destroy_argocd() {
 
   cd "$TERRAFORM_ARGOCD"
   log "terraform destroy (argocd)..."
-  if [[ -f "${SECRETS_DIR}/kubeconfig-admin.yaml" ]] \
-     && KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml" kubectl get ns &>/dev/null; then
-    run_visible terraform destroy -auto-approve
+  if [[ -f "${CLUSTER_KUBECONFIG}" ]] \
+     && KUBECONFIG="${CLUSTER_KUBECONFIG}" kubectl get ns &>/dev/null; then
+    run_visible terraform destroy -var-file="$var_file" -state="$state_file" -auto-approve
   else
     warn "API server unreachable — clearing tfstate without destroy"
-    run_soft rm -f terraform.tfstate terraform.tfstate.backup argocd.tfplan
+    run_soft rm -f "$state_file" "${state_file}.backup" "${CLUSTER_TFSTATE_DIR}/argocd.tfplan"
   fi
 
   cd "$ROOT_DIR"
@@ -172,9 +200,12 @@ phase7_destroy_argocd() {
 
 # ─── Phase 5: Observability stack ─────────────────────────────────────────────
 phase5_destroy_observability() {
-  phase "Phase 5: Destroy Observability Stack (terraform)"
+  phase "Phase 5: Destroy Observability Stack (terraform) — ${CLUSTER_NAME}"
 
-  if [[ ! -f "${TERRAFORM_OBS}/terraform.tfstate" ]]; then
+  local var_file="${CLUSTER_DIR}/observability.tfvars"
+  local state_file="${CLUSTER_TFSTATE_DIR}/observability.tfstate"
+
+  if [[ ! -f "$state_file" ]]; then
     log "No observability tfstate found — nothing to destroy."
     return 0
   fi
@@ -182,7 +213,7 @@ phase5_destroy_observability() {
   echo -e "${BOLD}This will:${NC}"
   echo -e "  - helm uninstall kube-prometheus-stack (Prometheus, Alertmanager, KSM)"
   echo -e "  - delete monitoring namespace + all PVCs"
-  echo -e "  - tfstate: ${CYAN}${TERRAFORM_OBS}/terraform.tfstate${NC}"
+  echo -e "  - tfstate: ${CYAN}${state_file}${NC}"
   echo ""
 
   if ! confirm "Proceed with observability teardown?"; then
@@ -192,18 +223,12 @@ phase5_destroy_observability() {
 
   cd "$TERRAFORM_OBS"
   log "terraform destroy (observability)..."
-  # The provider talks to the cluster — if RKE2 is already gone the destroy
-  # will fail to reach the API. That's OK; run_soft tolerates it and Phase 2
-  # will wipe the cluster anyway.
-  if [[ -f "${SECRETS_DIR}/kubeconfig-admin.yaml" ]] \
-     && KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml" kubectl get ns &>/dev/null; then
-    run_visible terraform destroy -auto-approve
+  if [[ -f "${CLUSTER_KUBECONFIG}" ]] \
+     && KUBECONFIG="${CLUSTER_KUBECONFIG}" kubectl get ns &>/dev/null; then
+    run_visible terraform destroy -var-file="$var_file" -state="$state_file" -auto-approve
   else
     warn "API server unreachable — clearing tfstate without destroy"
-    run_soft terraform state list
-    # If the cluster is already gone, Helm releases are gone too. Just drop
-    # tfstate so a future apply starts clean.
-    run_soft rm -f terraform.tfstate terraform.tfstate.backup obs.tfplan
+    run_soft rm -f "$state_file" "${state_file}.backup" "${CLUSTER_TFSTATE_DIR}/observability.tfplan"
   fi
 
   cd "$ROOT_DIR"
@@ -214,12 +239,12 @@ phase5_destroy_observability() {
 phase4_uninstall_security() {
   phase "Phase 4: Uninstall Security Addons (cert-manager, ESO, RBAC, NetPols)"
 
-  if [[ ! -f "${SECRETS_DIR}/kubeconfig-admin.yaml" ]]; then
-    log "No admin kubeconfig — cluster probably already gone. Skipping."
+  if [[ ! -f "${CLUSTER_KUBECONFIG}" ]]; then
+    log "No admin kubeconfig at ${CLUSTER_KUBECONFIG} — cluster probably already gone. Skipping."
     return 0
   fi
 
-  export KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
+  export KUBECONFIG="${CLUSTER_KUBECONFIG}"
 
   if ! kubectl get nodes &>/dev/null; then
     warn "API server unreachable — skipping (Phase 3 will wipe everything)"
@@ -352,9 +377,12 @@ REMOTE
 
 # ─── Phase 2: Destroy Proxmox VMs ─────────────────────────────────────────────
 phase2_destroy_proxmox() {
-  phase "Phase 2: Destroy Proxmox VMs (terraform)"
+  phase "Phase 2: Destroy Proxmox VMs (terraform) — ${CLUSTER_NAME}"
 
-  if [[ ! -f "${TERRAFORM_PROXMOX}/terraform.tfstate" ]]; then
+  local var_file="${CLUSTER_DIR}/proxmox.tfvars"
+  local state_file="${CLUSTER_TFSTATE_DIR}/proxmox.tfstate"
+
+  if [[ ! -f "$state_file" ]]; then
     log "No Proxmox tfstate found — nothing to destroy."
     return 0
   fi
@@ -366,9 +394,9 @@ phase2_destroy_proxmox() {
     export TF_VAR_proxmox_password='...'"
   fi
 
-  echo -e "${BOLD}${RED}This will PERMANENTLY DESTROY:${NC}"
+  echo -e "${BOLD}${RED}This will PERMANENTLY DESTROY (cluster: ${CLUSTER_NAME}):${NC}"
   cd "$TERRAFORM_PROXMOX"
-  terraform state list 2>/dev/null | sed 's/^/  - /' || true
+  terraform state list -state="$state_file" 2>/dev/null | sed 's/^/  - /' || true
   echo ""
 
   if ! confirm "Proceed with VM destruction? (Cannot be undone)"; then
@@ -378,10 +406,10 @@ phase2_destroy_proxmox() {
   fi
 
   log "terraform destroy (Proxmox)..."
-  run_visible terraform destroy -auto-approve
+  run_visible terraform destroy -var-file="$var_file" -state="$state_file" -auto-approve
 
   cd "$ROOT_DIR"
-  success "Phase 2 complete — all VMs destroyed"
+  success "Phase 2 complete — VMs destroyed for ${CLUSTER_NAME}"
 }
 
 # ─── Local artifact cleanup ───────────────────────────────────────────────────
@@ -393,16 +421,16 @@ cleanup_local() {
     return 0
   fi
 
-  echo -e "${BOLD}This will delete:${NC}"
-  echo -e "  - ${CYAN}${SECRETS_DIR}/${NC}                   (kubeconfig, cluster token, tf-outputs)"
-  echo -e "  - ${CYAN}${RBAC_DIR}/kubeconfigs/${NC}         (role-specific kubeconfigs)"
-  echo -e "  - ${CYAN}${TERRAFORM_PROXMOX}/terraform.tfstate*${NC}"
-  echo -e "  - ${CYAN}${TERRAFORM_PROXMOX}/*.tfplan${NC}"
-  echo -e "  - ${CYAN}${TERRAFORM_OBS}/terraform.tfstate*${NC}"
-  echo -e "  - ${CYAN}${TERRAFORM_OBS}/*.tfplan${NC}"
-  echo -e "  - ${CYAN}${LOG_DIR}/${NC} (after this run completes)"
+  echo -e "${BOLD}This will delete (for cluster ${CLUSTER_NAME} only):${NC}"
+  echo -e "  - ${CYAN}${CLUSTER_TFSTATE_DIR}/${NC}            (per-cluster tfstate + tfplans)"
+  echo -e "  - ${CYAN}${CLUSTER_KUBECONFIG}${NC}              (admin kubeconfig)"
+  echo -e "  - ${CYAN}${CLUSTER_DIR}/rbac-kubeconfigs/${NC}   (role kubeconfigs)"
+  echo -e "  - ${CYAN}${CLUSTER_DIR}/handoff.md${NC}, tf-outputs.json"
+  echo -e "  - ${CYAN}${SECRETS_DIR}/${NC}                    (shared rke2 token + certs)"
+  echo -e "  - ${CYAN}${ROOT_DIR}/rke2/configs/{inventory,master-*,worker-*}${NC}"
   echo ""
-  echo -e "  ${BOLD}KEEPING:${NC} terraform.tfvars files (so deploy.sh works again)"
+  echo -e "  ${BOLD}KEEPING:${NC} clusters/${CLUSTER_NAME}/*.tfvars (so you can redeploy)"
+  echo -e "  ${BOLD}KEEPING:${NC} other clusters/ folders (this only touches ${CLUSTER_NAME})"
   echo ""
 
   if ! confirm "Proceed with local cleanup?"; then
@@ -410,49 +438,47 @@ cleanup_local() {
     return 0
   fi
 
-  run_soft rm -rf "$SECRETS_DIR"
-  # Only remove generated kubeconfig YAMLs — NOT the tracked README.md in this dir.
-  run_soft rm -f "${RBAC_DIR}/kubeconfigs"/*.yaml
-  run_soft rm -f "${TERRAFORM_PROXMOX}/terraform.tfstate" \
-                 "${TERRAFORM_PROXMOX}/terraform.tfstate.backup" \
-                 "${TERRAFORM_PROXMOX}/cluster.tfplan" \
-                 "${TERRAFORM_PROXMOX}/.terraform.lock.hcl"
-  run_soft rm -rf "${TERRAFORM_PROXMOX}/.terraform"
-  run_soft rm -f "${TERRAFORM_OBS}/terraform.tfstate" \
-                 "${TERRAFORM_OBS}/terraform.tfstate.backup" \
-                 "${TERRAFORM_OBS}/obs.tfplan" \
-                 "${TERRAFORM_OBS}/.terraform.lock.hcl"
-  run_soft rm -rf "${TERRAFORM_OBS}/.terraform"
+  # Per-cluster artifacts
+  run_soft rm -rf "${CLUSTER_TFSTATE_DIR}"
+  run_soft rm -f  "${CLUSTER_KUBECONFIG}"
+  run_soft rm -rf "${CLUSTER_DIR}/rbac-kubeconfigs"
+  run_soft rm -f  "${CLUSTER_DIR}/handoff.md" "${CLUSTER_DIR}/tf-outputs.json"
 
-  # Generated configs that come from terraform apply, not the user
-  # Only the per-deploy artifacts generated by terraform. NEVER delete tracked
-  # source files like alloy-config.alloy.tpl, rke2-cilium-config.yaml, etc.
-  # Glob the worker/master config files so this stays correct as worker_count
-  # changes (was: hardcoded 1..2, missed worker-3+ on bigger clusters).
+  # Shared per-deploy artifacts (live cluster on workstation)
+  run_soft rm -rf "$SECRETS_DIR"
+  # Old layout's RBAC kubeconfigs dir (pre-multi-cluster) — clean if present.
+  run_soft rm -f "${RBAC_DIR}/kubeconfigs"/*.yaml
+
+  # Shared terraform provider plugins (safe to re-init next deploy)
+  run_soft rm -rf "${TERRAFORM_PROXMOX}/.terraform"   "${TERRAFORM_PROXMOX}/.terraform.lock.hcl"
+  run_soft rm -rf "${TERRAFORM_OBS}/.terraform"        "${TERRAFORM_OBS}/.terraform.lock.hcl"
+  run_soft rm -rf "${TERRAFORM_ARGOCD}/.terraform"     "${TERRAFORM_ARGOCD}/.terraform.lock.hcl"
+
+  # Generated per-deploy inventory/configs (regenerated by terraform on next apply).
+  # NEVER delete tracked source files like alloy-config.alloy.tpl.
   run_soft rm -f "${ROOT_DIR}/rke2/configs/inventory.ini" \
                  "${ROOT_DIR}/rke2/configs"/master-[0-9]*-config.yaml \
                  "${ROOT_DIR}/rke2/configs"/worker-[0-9]*-config.yaml
 
-  success "Local cleanup complete"
-  # Note: $LOG_DIR is removed below in main() AFTER all logging is done.
+  success "Local cleanup complete (only ${CLUSTER_NAME} affected)"
 }
 
 # ─── Final Summary ─────────────────────────────────────────────────────────────
 print_summary() {
-  phase "Uninstall Complete"
+  phase "Uninstall Complete — ${CLUSTER_NAME}"
   echo -e "${BOLD}What's gone:${NC}"
   echo -e "  ✓ Observability stack (Prometheus + Alertmanager)"
   echo -e "  ✓ Cluster addons (cert-manager, ESO, RBAC, NetworkPolicies)"
-  echo -e "  ✓ RKE2 + Alloy on all 5 nodes"
+  echo -e "  ✓ RKE2 + Alloy on every node of ${CLUSTER_NAME}"
   echo -e "  ✓ Proxmox VMs (terraform destroyed)"
-  [[ "$KEEP_LOCAL" == "false" ]] && echo -e "  ✓ Local kubeconfigs, tfstate, secrets"
+  [[ "$KEEP_LOCAL" == "false" ]] && echo -e "  ✓ Local kubeconfigs, tfstate, secrets (for ${CLUSTER_NAME} only)"
   echo ""
   echo -e "${BOLD}What's kept (so you can redeploy):${NC}"
-  echo -e "  - terraform/proxmox/terraform.tfvars"
-  echo -e "  - terraform/observability/terraform.tfvars"
+  echo -e "  - clusters/${CLUSTER_NAME}/*.tfvars"
   echo -e "  - All source code under git"
+  echo -e "  - Other clusters under clusters/ are untouched"
   echo ""
-  echo -e "${BOLD}To redeploy:${NC}  ${CYAN}./scripts/deploy.sh${NC}"
+  echo -e "${BOLD}To redeploy:${NC}  ${CYAN}./scripts/deploy.sh ${CLUSTER_NAME}${NC}"
   echo ""
   success "Done. Log: ${LOG_FILE}"
 }

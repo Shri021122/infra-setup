@@ -146,8 +146,10 @@ spec:
       mode: kubernetes    # Use Kubernetes node CIDR allocations
 
     # ── Cluster mesh (optional — enable for multi-cluster) ───────────────────
+    # CLUSTER_NAME_PLACEHOLDER is sed-substituted by install-master.sh from the
+    # cluster_name in the current deploy's tfvars. Don't hardcode here.
     cluster:
-      name: rke2-prod
+      name: CLUSTER_NAME_PLACEHOLDER
       id: 1
 
     # ── Resources ─────────────────────────────────────────────────────────────

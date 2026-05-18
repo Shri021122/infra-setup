@@ -20,29 +20,31 @@
 ## ⚡ Quickstart
 
 From bare VMs to a running, observable, secure Kubernetes cluster in **~30 minutes**.
+This repo is **multi-cluster aware** — one directory per cluster under `clusters/`.
 
 ```bash
 # 1. Clone
 git clone https://github.com/<you>/infra-setup.git && cd infra-setup
 
-# 2. Configure (fill in your Proxmox + network details)
-cp terraform/proxmox/terraform.tfvars.example terraform/proxmox/terraform.tfvars
-cp terraform/observability/terraform.tfvars.example terraform/observability/terraform.tfvars
-$EDITOR terraform/proxmox/terraform.tfvars
-
-# 3. Set secrets — Proxmox via API token (preferred) or password
+# 2. Set secrets in your shell (no SSH-to-Proxmox required — API token only)
 export TF_VAR_proxmox_api_token='terraform@pve!terraform=<UUID>'
-# OR
-export TF_VAR_proxmox_password='...'
-
-# Optional — leave empty if your central stack has no auth
-export TF_VAR_central_mimir_password=''
+export TF_VAR_central_mimir_password=''     # empty if your central stack has no auth
 export TF_VAR_central_loki_password=''
 export TF_VAR_alertmanager_slack_webhook=''
 
-# 4. Deploy
-./scripts/deploy.sh
+# 3. Scaffold a new cluster (interactive wizard)
+./scripts/new-cluster.sh acme-prod
+
+# 4. Review + commit the cluster definition through GitLab
+git add clusters/acme-prod
+git commit -m "feat(clusters): bootstrap acme-prod"
+git push
+
+# 5. Deploy
+./scripts/deploy.sh acme-prod
 ```
+
+To deploy another cluster: `./scripts/new-cluster.sh widgets-prod` → commit → `./scripts/deploy.sh widgets-prod`. Each cluster's tfvars + tfstate + kubeconfig stays in its own `clusters/<name>/` folder; the Terraform code under `terraform/` is shared.
 
 Terraform provisions the VMs, RKE2 installs masters then workers, kube-vip floats the control-plane VIP, Cilium comes up as kube-proxy replacement + IngressController + Hubble, RBAC + NetworkPolicies + cert-manager + ESO apply, Prometheus deploys, and Grafana Alloy ships logs and metrics to your central stack.
 
@@ -152,10 +154,15 @@ Reverse it all with `./scripts/uninstall.sh` (interactive, symmetric to deploy).
 
 ```
 infra-setup/
+├── clusters/                    ← ONE folder per cluster, tfvars tracked in Git
+│   ├── _template/               ← copy this when adding a cluster
+│   ├── test-prod/               ← example cluster (tfvars in Git, tfstate gitignored)
+│   └── <your-cluster>/          ← created by ./scripts/new-cluster.sh
 ├── scripts/
-│   ├── deploy.sh                ← single-command deployment (Phases 2–7)
-│   └── uninstall.sh             ← reverse of deploy.sh (interactive, --dry-run/--yes)
-├── terraform/
+│   ├── deploy.sh    <cluster>   ← single-command deployment (Phases 2–7)
+│   ├── uninstall.sh <cluster>   ← reverse of deploy.sh (interactive, per-cluster)
+│   └── new-cluster.sh <cluster> ← interactive wizard, writes clusters/<name>/*.tfvars
+├── terraform/                   ← SHARED module code (no per-cluster copies)
 │   ├── proxmox/                 ← VM provisioning (API-token-only)
 │   │   └── snippets/k8s-common.yaml  ← admin uploads once per Proxmox host
 │   ├── observability/           ← Prometheus + Alertmanager (Helm via TF)

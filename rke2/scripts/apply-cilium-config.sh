@@ -39,9 +39,15 @@ log "SSH user: ${SSH_USER}, key: ${SSH_KEY}"
 
 # Match install-master.sh's substitution: each cilium pod targets the local
 # apiserver, so the placeholder becomes the node's own IP, not the VIP.
+# CLUSTER_NAME comes from inventory.ini's [all:vars] (written by terraform).
+CLUSTER_NAME=$(grep '^cluster_name=' "$INVENTORY" | head -1 | cut -d= -f2)
+[[ -n "$CLUSTER_NAME" ]] || { echo "ERROR: cluster_name not found in $INVENTORY"; exit 1; }
+
 TMP_PATCHED=$(mktemp /tmp/cilium-patched.XXXXXX.yaml)
 trap "rm -f $TMP_PATCHED" EXIT
-sed "s/CONTROL_PLANE_VIP_PLACEHOLDER/${INIT_MASTER_IP}/g" "$CILIUM_CONFIG_SRC" > "$TMP_PATCHED"
+sed -e "s/CONTROL_PLANE_VIP_PLACEHOLDER/${INIT_MASTER_IP}/g" \
+    -e "s/CLUSTER_NAME_PLACEHOLDER/${CLUSTER_NAME}/g" \
+    "$CILIUM_CONFIG_SRC" > "$TMP_PATCHED"
 
 log "Copying patched cilium config to init master..."
 scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \

@@ -2,6 +2,7 @@
 .secrets/
 *.tfvars
 !*.tfvars.example
+!clusters/**/*.tfvars       # per-cluster tfvars ARE the cluster definition — tracked
 *.pem
 *.key
 *.crt
@@ -12,6 +13,12 @@ kubeconfigs/*.yaml
 rke2/configs/inventory.ini
 rke2/configs/master-*-config.yaml
 rke2/configs/worker-*-config.yaml
+
+# Per-cluster generated artifacts — never tracked
+clusters/*/tfstate/
+clusters/*/kubeconfig.yaml
+clusters/*/rbac-kubeconfigs/
+clusters/*/handoff.md
 
 # Terraform state — use remote backend in production
 *.tfstate

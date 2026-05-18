@@ -13,16 +13,30 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SECRETS_DIR="${SCRIPT_DIR}/../../.secrets"
-KUBECONFIGS_DIR="${SCRIPT_DIR}/../kubeconfigs"
-ADMIN_KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Multi-cluster mode: callers (deploy.sh) pass the cluster name. Falls back to
+# inventory.ini's [all:vars] cluster_name for ad-hoc invocations.
+CLUSTER_NAME="${1:-${CLUSTER_NAME:-}}"
+INVENTORY="${ROOT_DIR}/rke2/configs/inventory.ini"
+if [[ -z "$CLUSTER_NAME" ]]; then
+  CLUSTER_NAME=$(grep '^cluster_name=' "$INVENTORY" 2>/dev/null | head -1 | cut -d= -f2)
+fi
+[[ -n "$CLUSTER_NAME" ]] || { echo "ERROR: cluster name not provided. Usage: $0 <cluster-name>"; exit 1; }
+
+# Per-cluster paths
+CLUSTER_DIR="${ROOT_DIR}/clusters/${CLUSTER_NAME}"
+ADMIN_KUBECONFIG="${CLUSTER_DIR}/kubeconfig.yaml"
+KUBECONFIGS_DIR="${CLUSTER_DIR}/rbac-kubeconfigs"
+SECRETS_DIR="${ROOT_DIR}/.secrets"     # certs still live here (gitignored)
+
+[[ -f "$ADMIN_KUBECONFIG" ]] || { echo "ERROR: admin kubeconfig not found at $ADMIN_KUBECONFIG"; exit 1; }
 
 mkdir -p "$KUBECONFIGS_DIR" "$SECRETS_DIR/certs"
 chmod 700 "$KUBECONFIGS_DIR" "$SECRETS_DIR/certs"
 
 # SSH key for reaching master — read from inventory so it matches what
 # cloud-init actually injected into the VM (the tfvars vm_ssh_public_key).
-INVENTORY="${SCRIPT_DIR}/../../rke2/configs/inventory.ini"
 SSH_KEY=$(grep 'ansible_ssh_private_key_file=' "$INVENTORY" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' | sed "s|^~|$HOME|")
 [[ -f "$SSH_KEY" ]] || SSH_KEY="$HOME/.ssh/rke2_cluster_id"
 SSH_OPTS="-o StrictHostKeyChecking=no -o BatchMode=yes -i ${SSH_KEY}"
@@ -91,7 +105,7 @@ apiVersion: v1
 kind: Config
 preferences: {}
 clusters:
-  - name: rke2-prod
+  - name: ${CLUSTER_NAME}
     cluster:
       server: ${API_SERVER}
       certificate-authority-data: ${CA_DATA}
@@ -101,12 +115,12 @@ users:
       client-certificate-data: ${client_cert}
       client-key-data: ${client_key}
 contexts:
-  - name: ${username}@rke2-prod
+  - name: ${username}@${CLUSTER_NAME}
     context:
-      cluster: rke2-prod
+      cluster: ${CLUSTER_NAME}
       user: ${username}
       namespace: $(get_default_namespace "$group")
-current-context: ${username}@rke2-prod
+current-context: ${username}@${CLUSTER_NAME}
 EOF
 
   chmod 600 "$kubeconfig_file"

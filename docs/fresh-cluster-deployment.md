@@ -15,11 +15,15 @@ This document walks you through deploying a brand-new RKE2 Kubernetes cluster on
 
 **Deployment model:**
 
-- Phase 1 is manual (one-time Proxmox prep)
-- Phases 2–7 run via a single script: `./scripts/deploy.sh`
-- Phase 7 (ArgoCD) is optional — skipped automatically if you haven't created
-  `terraform/argocd/terraform.tfvars`
-- You can also run each phase individually if needed
+- Multi-cluster: each cluster has its own folder under `clusters/<cluster-name>/`
+  with three tfvars files (proxmox, observability, argocd). The Terraform code
+  under `terraform/` is shared across all clusters — never copied.
+- Phase 1 is manual (one-time Proxmox prep — token + template + snippet upload).
+- Cluster bootstrap is `./scripts/new-cluster.sh <name>` (interactive wizard).
+- Phases 2–7 run via `./scripts/deploy.sh <cluster-name>`.
+- Phase 7 (ArgoCD) is optional — skipped automatically if `argocd.tfvars`
+  isn't in `clusters/<cluster-name>/`.
+- You can also run each phase individually with `--from phaseN` / `--only phaseN`.
 
 ---
 
@@ -303,14 +307,28 @@ qm list | grep $TEMPLATE_ID
 
 # Phase 2 — Configure and Apply Terraform
 
-## 2.1 Copy and Fill Proxmox tfvars
+## 2.1 Scaffold the cluster directory (recommended) OR copy the template
+
+**Recommended — interactive wizard:**
 
 ```bash
-cd terraform/proxmox
-cp terraform.tfvars.example terraform.tfvars
+./scripts/new-cluster.sh <cluster-name>
 ```
 
-Open `terraform.tfvars` and fill in **every** value. Key fields:
+Prompts for subnet CIDR, master/worker counts + IPs, sizing, SSH key path, and
+endpoints. Auto-derives IPs from your subnet (e.g. `.100` VIP, `.101+` masters,
+`.111+` workers, `.200` LB). Writes `clusters/<cluster-name>/{proxmox,observability,argocd}.tfvars`.
+
+**Manual — copy the template:**
+
+```bash
+cp -r clusters/_template clusters/<cluster-name>
+$EDITOR clusters/<cluster-name>/proxmox.tfvars
+$EDITOR clusters/<cluster-name>/observability.tfvars
+$EDITOR clusters/<cluster-name>/argocd.tfvars   # delete this file if you don't want ArgoCD
+```
+
+Key fields in `proxmox.tfvars`:
 
 ```hcl
 # Connection (API token only — no Proxmox SSH key needed)
