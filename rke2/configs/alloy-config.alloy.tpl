@@ -250,9 +250,10 @@ loki.write "central_loki" {
 
     tenant_id = "${LOKI_TENANT_ID}"
 
-    // Batch settings — tune based on network latency to central Loki
+    // Batch settings — tune based on network latency to central Loki.
+    // batch_size moved from raw int to units-typed string in Alloy ≥1.0.
     batch_wait = "1s"
-    batch_size = 1048576   // 1 MB
+    batch_size = "1MiB"
   }
 
   // Labels on every log line from this node
