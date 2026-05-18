@@ -82,6 +82,20 @@ resource "proxmox_virtual_environment_vm" "worker" {
   initialization {
     datastore_id = var.disk_storage
 
+    # Don't make Proxmox's auto-generated user-data inject `package_upgrade: true`.
+    # That triggers `apt upgrade && snap refresh` during cloud-init, and snapd is
+    # stripped from the template (virt-customize), so snap refresh fails and
+    # cloud-init exits non-zero — even though every other step succeeded.
+    upgrade = false
+
+    # Generic host-prep snippet uploaded once by a Proxmox admin (packages,
+    # chrony, swap-off, growpart, qemu-guest-agent). Use vendor_data_file_id
+    # (NOT user_data_file_id) — vendor-data is cloud-init's "platform extras"
+    # slot that *complements* the user-data Proxmox auto-generates from the
+    # user_account/ip_config/dns blocks below. user_data_file_id would override
+    # them and leave authorized_keys empty.
+    vendor_data_file_id = var.cloud_init_user_data_file_id != "" ? var.cloud_init_user_data_file_id : null
+
     ip_config {
       ipv4 {
         address = var.ip_address != "" ? "${var.ip_address}/24" : "dhcp"

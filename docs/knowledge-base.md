@@ -233,11 +233,19 @@ helm version --short  # ≥ 3.14
 jq --version
 openssl version
 
-# Two SSH keys: one for the cluster VMs, one for the Proxmox host
+# Just one SSH key — for the cluster VMs. Terraform reaches Proxmox via API
+# token only; no Proxmox-root SSH key is needed (see "Cloud-init snippet"
+# below).
 ssh-keygen -t ed25519 -f ~/.ssh/rke2_cluster_id -N "" -C "rke2-cluster-deploy"
-ssh-keygen -t ed25519 -f ~/.ssh/proxmox_id_rsa -N "" -C "proxmox-root"
-ssh-copy-id -i ~/.ssh/proxmox_id_rsa.pub root@<proxmox-host-ip>
 ```
+
+> **One-time per Proxmox host** (admin task, not per cluster): upload
+> `terraform/proxmox/snippets/k8s-common.yaml` to `local:snippets/` via the
+> Proxmox web UI (Datacenter → Storage → local → Snippets → Upload) or via
+> a single `scp`. Then set
+> `shared_cloud_init_snippet_file_id = "local:snippets/k8s-common.yaml"`
+> in `terraform/proxmox/terraform.tfvars`. After this one-time step, every
+> cluster deploy talks to Proxmox exclusively over the REST API.
 
 ## Phase 1.6 — Fill in tfvars + placeholders (per cluster)
 

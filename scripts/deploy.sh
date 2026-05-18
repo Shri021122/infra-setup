@@ -200,9 +200,13 @@ phase2_terraform_proxmox() {
   for ip in $VM_IPS; do
     log "  Waiting for SSH on ${ip}..."
     local waited=0
-    until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-              -o BatchMode=yes -i "${SSH_KEY}" "${SSH_USER}@${ip}" \
-              "cloud-init status --wait 2>/dev/null && echo ready" 2>/dev/null | grep -q ready; do
+    # cloud-init may exit non-zero for non-fatal reasons (e.g. snapd-not-installed
+    # on a virt-customize-stripped template), even when user creation / SSH /
+    # package install succeeded. We only care that we can SSH in and that
+    # cloud-init has finished running — exit code is not load-bearing.
+    until ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=5 -o BatchMode=yes -i "${SSH_KEY}" "${SSH_USER}@${ip}" \
+              "cloud-init status --wait >/dev/null 2>&1; echo ready" 2>/dev/null | grep -q ready; do
       sleep 10; waited=$((waited+10))
       [[ $waited -lt 300 ]] || err "Timeout waiting for SSH on ${ip}"
     done

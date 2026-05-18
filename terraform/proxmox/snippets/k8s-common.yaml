@@ -1,12 +1,15 @@
 #cloud-config
-# Rendered by Terraform — do not edit directly
-users:
-  - name: ${vm_user}
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    groups: [sudo, docker]
-    shell: /bin/bash
-    ssh_authorized_keys:
-      - ${ssh_public_key}
+# Generic first-boot prep for any Kubernetes node running on a Proxmox VM.
+#
+# This file is uploaded ONCE per Proxmox host by an admin (web UI: Datacenter
+# → Storage → local → Snippets → Upload; or scp to /var/lib/vz/snippets/).
+# Terraform then references it as user_data_file_id without ever touching SSH.
+#
+# Per-cluster bits (SSH key, hostname, IP/DNS, user account) are NOT here —
+# they're injected via the Proxmox API's initialization{} blocks per VM.
+#
+# Final path on Proxmox: /var/lib/vz/snippets/k8s-common.yaml
+# File ID for Terraform:  local:snippets/k8s-common.yaml
 
 # Grow root partition+filesystem to fill the disk BEFORE installing/upgrading
 growpart:
@@ -22,7 +25,6 @@ package_update: true
 package_upgrade: false
 
 packages:
-  # qemu-guest-agent and chrony are pre-baked into the template via virt-customize.
   - curl
   - wget
   - vim
@@ -37,6 +39,8 @@ packages:
   - ca-certificates
   - gnupg
   - lsb-release
+  - qemu-guest-agent
+  - chrony
 
 write_files:
   - path: /etc/chrony.conf
@@ -53,12 +57,5 @@ runcmd:
   - systemctl disable --now ufw
   - swapoff -a
   - sed -i '/swap/d' /etc/fstab
-  - hostnamectl set-hostname $(hostname -s).${domain_name}
-
-manage_resolv_conf: true
-resolv_conf:
-  nameservers: [${dns_servers}]
-  searchdomains:
-    - ${domain_name}
 
 final_message: "Cloud-init complete after $UPTIME seconds"

@@ -36,16 +36,20 @@ variable "proxmox_tls_insecure" {
   default     = false
 }
 
-variable "proxmox_ssh_user" {
-  description = "SSH user on Proxmox host for file uploads"
-  type        = string
-  default     = "root"
-}
+variable "shared_cloud_init_snippet_file_id" {
+  description = <<-EOT
+    Proxmox file ID of a cloud-init snippet that an admin pre-uploaded to the
+    Proxmox host (e.g. "local:snippets/k8s-common.yaml"). When non-empty, the
+    file is set as user_data_file_id on every VM's initialization{} block.
+    Leave empty to skip referencing a snippet — Proxmox API user_account /
+    ip_config / dns blocks still wire up SSH user, IP, and DNS per VM.
 
-variable "proxmox_ssh_private_key_path" {
-  description = "Path to SSH private key for Proxmox host access"
+    Upload the snippet once per Proxmox host via: Datacenter → Storage → local
+    → Snippets → Upload (or scp to /var/lib/vz/snippets/ during initial setup).
+    The provided file lives at terraform/proxmox/snippets/k8s-common.yaml.
+  EOT
   type        = string
-  default     = "~/.ssh/id_rsa"
+  default     = ""
 }
 
 variable "proxmox_node" {

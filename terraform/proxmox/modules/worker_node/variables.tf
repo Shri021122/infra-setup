@@ -55,8 +55,10 @@ variable "dns_servers" {
 variable "domain_name" {
   type = string
 }
-variable "cloud_init_snippet" {
-  type = string
+variable "cloud_init_user_data_file_id" {
+  description = "Proxmox file ID of a pre-uploaded cloud-init snippet (e.g. 'local:snippets/k8s-common.yaml'). Empty = no user_data reference."
+  type        = string
+  default     = ""
 }
 variable "ssh_public_key" {
   type = string

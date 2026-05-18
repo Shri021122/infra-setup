@@ -69,21 +69,50 @@ chmod 600 ~/.ssh/rke2_cluster_id
 cat ~/.ssh/rke2_cluster_id.pub
 ```
 
-## 0.3 SSH Key for Proxmox Root Access
+## 0.3 One-time Proxmox snippet upload (API-token-only deploys)
 
-Terraform needs root SSH access to Proxmox for file uploads (VM configs):
+Terraform talks to Proxmox **via API token only** — no SSH-as-root required.
+The one exception is the generic first-boot cloud-init snippet (package
+install, chrony, swap-off, growpart). That snippet is uploaded to Proxmox
+**once per host** by a Proxmox admin, **not** by Terraform.
+
+There are two paths to do this — pick whichever your Proxmox admin can run:
+
+**Option A — Web UI (recommended; no SSH needed at all)**
+
+1. Log into Proxmox web UI as an admin.
+2. Datacenter → Storage → `local` → Snippets tab → Upload.
+3. Upload `terraform/proxmox/snippets/k8s-common.yaml` from this repo.
+4. Confirm the file appears as `local:snippets/k8s-common.yaml`.
+
+**Option B — Admin shell (one-time scp from a workstation that does have SSH)**
 
 ```bash
-# Generate or reuse an existing root SSH key
-ssh-keygen -t ed25519 -f ~/.ssh/proxmox_id_rsa -C "proxmox-root" -N ""
-chmod 600 ~/.ssh/proxmox_id_rsa
-
-# Copy public key to Proxmox host (run this once)
-ssh-copy-id -i ~/.ssh/proxmox_id_rsa.pub root@YOUR_PROXMOX_IP
-
-# Verify it works
-ssh -i ~/.ssh/proxmox_id_rsa root@YOUR_PROXMOX_IP "hostname"
+scp terraform/proxmox/snippets/k8s-common.yaml \
+    root@YOUR_PROXMOX_HOST:/var/lib/vz/snippets/
+ssh root@YOUR_PROXMOX_HOST "ls -l /var/lib/vz/snippets/k8s-common.yaml"
 ```
+
+Either way, once the file is on the Proxmox host, set this in
+`terraform/proxmox/terraform.tfvars`:
+
+```hcl
+shared_cloud_init_snippet_file_id = "local:snippets/k8s-common.yaml"
+```
+
+Every cluster you deploy thereafter reads the file via the Proxmox REST API
+— no Terraform-managed SSH connection to Proxmox at any point.
+
+> Skipping this step is also fine: leave `shared_cloud_init_snippet_file_id`
+> empty and Terraform won't reference any snippet. VMs still come up with the
+> right user, IP, DNS, and hostname (those go through the API regardless),
+> but package preinstall / chrony / swap-off will not run.
+>
+> **DANGER for existing clusters:** The Proxmox provider treats
+> `user_data_file_id` as `ForceNew` — flipping it from empty to a value on
+> a cluster that's already deployed will destroy and recreate every VM.
+> Only set it on a **fresh** deploy where no VMs exist yet (or where you
+> are deliberately re-provisioning).
 
 ## 0.4 IP Address Planning
 
@@ -206,7 +235,7 @@ qm list | grep $TEMPLATE_ID
 
 - [ ] `terraform@pve` token created and saved
 - [ ] VM 9000 (or your chosen ID) shows as template in `qm list`
-- [ ] SSH key (`proxmox_id_rsa`) works: `ssh -i ~/.ssh/proxmox_id_rsa root@PROXMOX_IP hostname`
+- [ ] `snippets/k8s-common.yaml` uploaded to Proxmox `local` storage (Phase 0.3) — OR you've decided to skip the snippet
 - [ ] All node IPs planned and reserved in your network
 
 ---
@@ -225,13 +254,15 @@ cp terraform.tfvars.example terraform.tfvars
 Open `terraform.tfvars` and fill in **every** value. Key fields:
 
 ```hcl
-# Connection
-proxmox_api_url              = "https://192.168.1.10:8006/api2/json"
-proxmox_username             = "terraform@pve"
-proxmox_tls_insecure         = false          # true only if Proxmox uses self-signed cert
-proxmox_ssh_user             = "root"
-proxmox_ssh_private_key_path = "~/.ssh/proxmox_id_rsa"
-proxmox_node                 = "pve"          # run: pvesh get /nodes | grep node
+# Connection (API token only — no Proxmox SSH key needed)
+proxmox_api_url      = "https://192.168.1.10:8006/api2/json"
+proxmox_username     = "terraform@pve"
+proxmox_tls_insecure = false                  # true only if Proxmox uses self-signed cert
+proxmox_node         = "pve"                  # run: pvesh get /nodes | grep node
+
+# Shared cloud-init snippet (admin pre-uploaded — see Phase 0.3).
+# Leave empty to skip the snippet entirely.
+shared_cloud_init_snippet_file_id = "local:snippets/k8s-common.yaml"
 
 # Network
 network_bridge      = "vmbr0"
@@ -1065,11 +1096,18 @@ zip --password <temp-password> team-kubeconfigs.zip rbac/kubeconfigs/*.yaml
 # 1. Verify Proxmox API is reachable
 curl -sk https://YOUR_PROXMOX_IP:8006/api2/json/version | jq .data.version
 
-# 2. Verify SSH key works
-ssh -i ~/.ssh/proxmox_id_rsa root@YOUR_PROXMOX_IP "hostname"
+# 2. Verify the API token actually works
+curl -sk -H "Authorization: PVEAPIToken=${TF_VAR_proxmox_api_token}" \
+  https://YOUR_PROXMOX_IP:8006/api2/json/nodes | jq '.data | length'
 
 # 3. If TLS error — set proxmox_tls_insecure = true in tfvars (dev only)
 ```
+
+## Terraform apply fails: snippet file not found (`local:snippets/k8s-common.yaml`)
+
+You set `shared_cloud_init_snippet_file_id` in tfvars but the file isn't on
+the Proxmox host. Either upload it (Phase 0.3 — web UI or scp), or set the
+variable to `""` to skip the snippet reference entirely.
 
 ## VM created but SSH times out
 

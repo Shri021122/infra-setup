@@ -20,24 +20,16 @@ resource "local_file" "cluster_ssh_public_key" {
   filename = "${path.module}/../../.secrets/cluster_id_ed25519.pub"
 }
 
-# ─── Cloud-Init Snippet Files ─────────────────────────────────────────────────
-# These are uploaded to Proxmox snippets storage and referenced by VMs.
-
-resource "proxmox_virtual_environment_file" "cloud_init_common" {
-  content_type = "snippets"
-  datastore_id = "local"
-  node_name    = var.proxmox_node
-
-  source_raw {
-    file_name = "cloud-init-common.yaml"
-    data = templatefile("${path.module}/templates/cloud-init-common.yaml.tpl", {
-      ssh_public_key = var.vm_ssh_public_key != "" ? var.vm_ssh_public_key : tls_private_key.cluster_ssh.public_key_openssh
-      vm_user        = var.vm_user
-      dns_servers    = join(" ", var.dns_servers)
-      domain_name    = var.domain_name
-    })
-  }
-}
+# ─── Cloud-Init Snippet (one-time admin upload, then referenced via API) ─────
+# We do NOT upload the snippet from Terraform any more — that path required
+# SSH-as-root to Proxmox, which production hosts often disallow. Instead an
+# admin uploads snippets/k8s-common.yaml ONCE per Proxmox host (web UI:
+# Datacenter → Storage → local → Snippets → Upload). Terraform then references
+# the existing file by ID via the standard REST API.
+#
+# Set var.shared_cloud_init_snippet_file_id = "local:snippets/k8s-common.yaml"
+# in tfvars to use it. Leave empty to skip referencing a snippet entirely (the
+# Proxmox API user_account/ip_config/dns blocks below still wire up the VM).
 
 # ─── Master Nodes ─────────────────────────────────────────────────────────────
 
@@ -74,9 +66,9 @@ module "master_nodes" {
   domain_name     = var.domain_name
 
   # Cloud-init
-  cloud_init_snippet = proxmox_virtual_environment_file.cloud_init_common.id
-  ssh_public_key     = var.vm_ssh_public_key != "" ? var.vm_ssh_public_key : tls_private_key.cluster_ssh.public_key_openssh
-  vm_user            = var.vm_user
+  cloud_init_user_data_file_id = var.shared_cloud_init_snippet_file_id
+  ssh_public_key               = var.vm_ssh_public_key != "" ? var.vm_ssh_public_key : tls_private_key.cluster_ssh.public_key_openssh
+  vm_user                      = var.vm_user
 
   # Behavior
   agent_enabled   = var.vm_agent_enabled
@@ -135,9 +127,9 @@ module "worker_nodes" {
   domain_name    = var.domain_name
 
   # Cloud-init
-  cloud_init_snippet = proxmox_virtual_environment_file.cloud_init_common.id
-  ssh_public_key     = var.vm_ssh_public_key != "" ? var.vm_ssh_public_key : tls_private_key.cluster_ssh.public_key_openssh
-  vm_user            = var.vm_user
+  cloud_init_user_data_file_id = var.shared_cloud_init_snippet_file_id
+  ssh_public_key               = var.vm_ssh_public_key != "" ? var.vm_ssh_public_key : tls_private_key.cluster_ssh.public_key_openssh
+  vm_user                      = var.vm_user
 
   # SSH provisioner key
   ssh_private_key_path = var.vm_ssh_private_key_path

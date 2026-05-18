@@ -49,10 +49,7 @@ provider "proxmox" {
   # Set to true only in lab/dev environments
   insecure = var.proxmox_tls_insecure
 
-  # SSH configuration for file uploads and provisioning
-  ssh {
-    agent       = false
-    username    = var.proxmox_ssh_user
-    private_key = file(var.proxmox_ssh_private_key_path)
-  }
+  # NOTE: no ssh{} block — Terraform now talks to Proxmox via REST API only.
+  # The cloud-init snippet is uploaded once by an admin (see main.tf comment)
+  # and referenced by file ID, which the API supports natively.
 }

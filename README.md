@@ -156,7 +156,8 @@ infra-setup/
 │   ├── deploy.sh                ← single-command deployment (Phases 2–7)
 │   └── uninstall.sh             ← reverse of deploy.sh (interactive, --dry-run/--yes)
 ├── terraform/
-│   ├── proxmox/                 ← VM provisioning
+│   ├── proxmox/                 ← VM provisioning (API-token-only)
+│   │   └── snippets/k8s-common.yaml  ← admin uploads once per Proxmox host
 │   ├── observability/           ← Prometheus + Alertmanager (Helm via TF)
 │   └── argocd/                  ← ArgoCD + Ingress, LB IP pool, cert (Phase 7)
 ├── rke2/
@@ -191,15 +192,16 @@ infra-setup/
 
 **On Proxmox host:**
 - Proxmox VE 7 or 8
-- API token with VM management permissions
+- API token with VM management permissions (`terraform@pve!terraform`)
 - Ubuntu 22.04 cloud-init template
+- **One-time:** admin uploads `terraform/proxmox/snippets/k8s-common.yaml` to `local:snippets/` (web UI or scp). After that, Terraform never SSHs to Proxmox.
 
 **On your workstation:**
 - Terraform ≥ 1.6
 - kubectl ≥ 1.29
 - Helm ≥ 3.14
 - `openssl`, `jq`, `ssh`
-- Two SSH keypairs: `~/.ssh/rke2_cluster_id` (VMs) and `~/.ssh/proxmox_id_rsa` (Proxmox host)
+- One SSH keypair for the VMs (`~/.ssh/rke2_cluster_id`). No SSH key to Proxmox is required — Terraform uses only the API token.
 
 **Cluster defaults (all configurable):**
 - 3 master VMs: 4 vCPU / **8 GB RAM** / 50 GB OS + 20 GB etcd

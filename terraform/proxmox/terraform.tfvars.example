@@ -4,14 +4,25 @@
 # NEVER commit terraform.tfvars to git — it contains secrets.
 ################################################################################
 
-# ─── Proxmox Connection ───────────────────────────────────────────────────────
-proxmox_api_url              = "https://YOUR_PROXMOX_IP:8006/api2/json"
-proxmox_username             = "terraform@pve"
+# ─── Proxmox Connection (API-token only — no SSH required) ────────────────────
+proxmox_api_url      = "https://YOUR_PROXMOX_IP:8006/api2/json"
+proxmox_username     = "terraform@pve"
 # proxmox_password is set via: export TF_VAR_proxmox_password="your-password"
-proxmox_tls_insecure         = false
-proxmox_ssh_user             = "root"
-proxmox_ssh_private_key_path = "~/.ssh/proxmox_id_rsa"
-proxmox_node                 = "pve"   # Your Proxmox node name
+# Preferred: export TF_VAR_proxmox_api_token="terraform@pve!tokenid=UUID"
+proxmox_tls_insecure = false
+proxmox_node         = "pve"   # Your Proxmox node name
+
+# ─── Shared cloud-init snippet (one-time admin upload, then referenced) ───────
+# An admin uploads terraform/proxmox/snippets/k8s-common.yaml to Proxmox ONCE
+# (Datacenter → Storage → local → Snippets → Upload, or scp during initial
+# host setup). Then every cluster Terraform runs reference it via this file ID
+# — no SSH-from-Terraform needed. Leave empty to skip the snippet entirely
+# (VMs still get user/IP/DNS via API blocks; just no package preinstall etc.)
+#
+# DANGER: setting this on an *existing* deployed cluster forces VM recreation
+# (the provider marks user_data_file_id as ForceNew). Only set on FRESH
+# deploys or when you intend to re-provision.
+shared_cloud_init_snippet_file_id = ""   # e.g. "local:snippets/k8s-common.yaml"
 
 # ─── Network ──────────────────────────────────────────────────────────────────
 network_bridge      = "vmbr0"
