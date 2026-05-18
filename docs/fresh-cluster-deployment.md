@@ -141,7 +141,7 @@ Gather these values now — you will export them as environment variables before
 
 | Value | Where to Get It |
 |-------|----------------|
-| Proxmox API password | Proxmox `terraform@pve` user password |
+| Proxmox API token | Proxmox `terraform@pve` user token secret (created in Phase 1.1). Full string format: `terraform@pve!terraform=<UUID>` |
 | Central Mimir push URL | Your Mimir admin (e.g. `https://mimir.yourdomain.com/api/v1/push`) |
 | Central Loki push URL | Your Loki admin (e.g. `https://loki.yourdomain.com`) |
 | Mimir basic-auth password | Your Mimir admin (empty if no auth) |
@@ -169,7 +169,10 @@ grep -q ".secrets" .gitignore && echo "OK" || echo "ADD .secrets TO .gitignore N
 
 ## 1.1 Create the Terraform API Token
 
-Run these commands on the Proxmox host as `root`:
+This is the **only** identity Terraform ever uses against Proxmox — there is
+no SSH from Terraform anywhere. A Proxmox admin runs these on the Proxmox
+host once; the resulting token string is the only credential the deploying
+engineer needs.
 
 ```bash
 ssh root@YOUR_PROXMOX_IP
@@ -186,11 +189,23 @@ pveum role add TerraformRole -privs \
 pveum aclmod / -user terraform@pve -role TerraformRole
 
 # Create API token (no expiry — rotate manually if compromised)
-pveum user token add terraform@pve terraform --expire 0
-# OUTPUT: Secret = <TOKEN VALUE>  ← save this as your TF_VAR_proxmox_password
+pveum user token add terraform@pve terraform --expire 0 --privsep=0
+# OUTPUT (shown ONLY once — copy now):
+#   full-tokenid:  terraform@pve!terraform
+#   value:         <UUID>
+# Combine: terraform@pve!terraform=<UUID>   ← this whole string is what you export
 ```
 
 > **Important:** The token secret is shown only once. Copy it immediately.
+>
+> `--privsep=0` makes the token inherit the user's privileges (simplest). If
+> you'd rather scope it tighter, omit that flag and grant role to the token
+> ACL: `pveum aclmod / -token 'terraform@pve!terraform' -role TerraformRole`.
+
+You'll export the full token string as **`TF_VAR_proxmox_api_token`** before
+running `deploy.sh` (see Phase 2.3). Do **not** use the `TF_VAR_proxmox_password`
+variable for tokens — the provider auto-selects the token path when
+`TF_VAR_proxmox_api_token` is set.
 
 ## 1.2 Create the Ubuntu 22.04 Cloud-Init Template
 
@@ -332,8 +347,8 @@ stays `<pending>` — that's expected.
 ## 2.3 Export All Secrets
 
 ```bash
-# Required
-export TF_VAR_proxmox_password="your-proxmox-api-token-secret"
+# Required — full token string from Phase 1.1 (user!tokenid=UUID)
+export TF_VAR_proxmox_api_token='terraform@pve!terraform=<UUID>'
 
 # Mimir/Loki auth (leave empty string if no auth on your central stack)
 export TF_VAR_central_mimir_password=""
@@ -343,6 +358,9 @@ export TF_VAR_central_loki_password=""
 export TF_VAR_alertmanager_slack_webhook="https://hooks.slack.com/services/..."
 export TF_VAR_alertmanager_pagerduty_key="your-pd-routing-key"
 ```
+
+> Use single quotes around the token — the `!` is shell history-expansion in
+> bash with double quotes and will mangle the string.
 
 > **Tip:** Put these exports in a file like `.secrets/env.sh`, `chmod 600` it, and `source .secrets/env.sh` before each deploy session. Never commit this file.
 
@@ -627,7 +645,7 @@ kubeconfig-auditor-user.yaml         (valid 90 days)
 cd terraform/observability
 
 # Ensure secrets are still exported in your shell
-echo $TF_VAR_proxmox_password    # should not be empty
+echo $TF_VAR_proxmox_api_token   # should not be empty
 echo $TF_VAR_central_mimir_password
 echo $TF_VAR_alertmanager_slack_webhook
 

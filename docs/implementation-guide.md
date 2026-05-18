@@ -50,7 +50,10 @@ cp terraform.tfvars.example terraform.tfvars
 vim terraform.tfvars
 
 # Set sensitive values as environment variables
-export TF_VAR_proxmox_password="your-proxmox-password"
+# Preferred: API token (no SSH to Proxmox needed)
+export TF_VAR_proxmox_api_token='terraform@pve!terraform=<UUID>'
+# Fallback: username + password
+# export TF_VAR_proxmox_password="your-proxmox-password"
 ```
 
 ### 2.2 Initialize and Apply
