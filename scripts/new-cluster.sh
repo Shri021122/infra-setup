@@ -119,6 +119,7 @@ hdr "Masters"
 MASTER_COUNT=$(ask "Number of masters (odd: 1, 3, 5)" "3")
 [[ $((MASTER_COUNT % 2)) -eq 1 ]] || err "Master count must be ODD (etcd quorum)."
 MASTER_IPS=$(ask "Master IPs (comma)" "$(derive_ips "$SUBNET_CIDR" 101 "$MASTER_COUNT")")
+MASTER_VM_ID_START=$(ask "Proxmox VM ID for first master (must not clash with other clusters)" "401")
 MASTER_CPU=$(ask "Master CPU cores" "2")
 MASTER_RAM=$(ask "Master RAM (MB)" "8192")
 MASTER_DISK=$(ask "Master OS disk (GB)" "50")
@@ -128,10 +129,21 @@ MASTER_ETCD_DISK=$(ask "Master etcd disk (GB)" "20")
 hdr "Workers"
 WORKER_COUNT=$(ask "Number of workers" "3")
 WORKER_IPS=$(ask "Worker IPs (comma)" "$(derive_ips "$SUBNET_CIDR" 111 "$WORKER_COUNT")")
+# Default = first ID *after* the master block, leaving a gap (master_start + 9).
+# E.g. masters 421..423 → workers default to 430+.
+WORKER_VM_ID_DEFAULT=$((MASTER_VM_ID_START + 9))
+WORKER_VM_ID_START=$(ask "Proxmox VM ID for first worker (must not clash with other clusters)" "$WORKER_VM_ID_DEFAULT")
 WORKER_CPU=$(ask "Worker CPU cores" "8")
 WORKER_RAM=$(ask "Worker RAM (MB)" "16384")
 WORKER_DISK=$(ask "Worker OS disk (GB)" "100")
 WORKER_DATA_DISK=$(ask "Worker data disk (GB)" "200")
+
+# Validate VM ID ranges don't overlap each other on this same cluster
+MASTER_VM_ID_END=$((MASTER_VM_ID_START + MASTER_COUNT - 1))
+WORKER_VM_ID_END=$((WORKER_VM_ID_START + WORKER_COUNT - 1))
+if [[ "$WORKER_VM_ID_START" -le "$MASTER_VM_ID_END" && "$WORKER_VM_ID_END" -ge "$MASTER_VM_ID_START" ]]; then
+  err "Master VM IDs (${MASTER_VM_ID_START}-${MASTER_VM_ID_END}) overlap worker VM IDs (${WORKER_VM_ID_START}-${WORKER_VM_ID_END}). Pick non-overlapping ranges."
+fi
 
 # ─── SSH ──────────────────────────────────────────────────────────────────────
 hdr "SSH key (for VM access)"
@@ -218,7 +230,7 @@ vm_user                 = "${VM_USER}"
 vm_cpu_type             = "x86-64-v2-AES"
 
 master_count             = ${MASTER_COUNT}
-master_vm_id_start       = 401
+master_vm_id_start       = ${MASTER_VM_ID_START}
 master_cpu_cores         = ${MASTER_CPU}
 master_cpu_sockets       = 1
 master_memory_mb         = ${MASTER_RAM}
@@ -229,7 +241,7 @@ master_name_prefix       = "${CLUSTER_NAME}-m"
 master_ip_addresses      = ${MASTER_IPS_HCL}
 
 worker_count             = ${WORKER_COUNT}
-worker_vm_id_start       = 410
+worker_vm_id_start       = ${WORKER_VM_ID_START}
 worker_cpu_cores         = ${WORKER_CPU}
 worker_cpu_sockets       = 1
 worker_memory_mb         = ${WORKER_RAM}
