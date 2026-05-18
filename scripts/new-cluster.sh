@@ -80,16 +80,14 @@ derive_ips() {
   echo "$ips"
 }
 
-cat <<EOF
-
-${BOLD}${CYAN}╔══════════════════════════════════════════════════╗
-║   New Cluster Wizard — ${CLUSTER_NAME}
-╚══════════════════════════════════════════════════╝${NC}
-
-This wizard writes config to ${CYAN}${CLUSTER_DIR}/${NC} (does NOT deploy).
-Hit ${BOLD}Enter${NC} on any prompt to accept the [default].
-
-EOF
+echo ""
+echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}${CYAN}║   New Cluster Wizard — ${CLUSTER_NAME}${NC}"
+echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "This wizard writes config to ${CYAN}${CLUSTER_DIR}/${NC} (does NOT deploy)."
+echo -e "Hit ${BOLD}Enter${NC} on any prompt to accept the [default]."
+echo ""
 
 # ─── Identity ─────────────────────────────────────────────────────────────────
 hdr "Identity"
@@ -327,7 +325,7 @@ log "✓ Wrote ${CLUSTER_DIR}/proxmox.tfvars"
 log "✓ Wrote ${CLUSTER_DIR}/observability.tfvars"
 log ""
 log "${BOLD}Next steps:${NC}"
-log "  1. Review the generated files:  ${CYAN}$EDITOR ${CLUSTER_DIR}/*.tfvars${NC}"
+log "  1. Review the generated files:  ${CYAN}\${EDITOR:-vi} ${CLUSTER_DIR}/*.tfvars${NC}"
 log "  2. Commit through your GitLab MR:"
 log "       ${CYAN}git add ${CLUSTER_DIR} && git commit -m 'feat: add ${CLUSTER_NAME}'${NC}"
 log "  3. After merge, deploy:"
