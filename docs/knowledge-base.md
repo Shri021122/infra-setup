@@ -42,7 +42,7 @@ A self-hosted, HA Kubernetes cluster on Proxmox VE, designed for a stack that al
 | Logs | **Grafana Alloy** (systemd, every VM) | Pod logs + journald → central Loki |
 | Network observability | **Hubble** (Cilium component) | Per-flow visibility, DNS, HTTP |
 
-**Three masters, two workers, one Proxmox host** is the default. Workers scale horizontally; masters must stay odd (1/3/5) for etcd quorum.
+**Three masters + N workers (3 recommended), one Proxmox host** is the default. Workers scale horizontally — two will boot fine but three leaves headroom for cordon-drain during rolling upgrades. Masters must stay odd (1/3/5) for etcd quorum.
 
 ---
 
@@ -767,4 +767,4 @@ export TF_VAR_alertmanager_pagerduty_key=''
 
 ---
 
-*Last updated: 2026-05-15 | Cluster: `rke2-prod` | Live: 3 masters + 2 workers, RKE2 v1.32.10+rke2r1, Cilium v1.18 (kube-proxy replacement), kube-vip VIP active*
+*Last updated: 2026-05-18 | Cluster: `rke2-prod` | RKE2 v1.32.10+rke2r1, Cilium v1.18 (kube-proxy replacement + L2 announcements + LB IPAM), kube-vip control-plane VIP, ArgoCD for GitOps*

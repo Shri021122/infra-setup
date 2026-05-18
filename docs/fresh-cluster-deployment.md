@@ -16,7 +16,9 @@ This document walks you through deploying a brand-new RKE2 Kubernetes cluster on
 **Deployment model:**
 
 - Phase 1 is manual (one-time Proxmox prep)
-- Phases 2–6 run via a single script: `./scripts/deploy.sh`
+- Phases 2–7 run via a single script: `./scripts/deploy.sh`
+- Phase 7 (ArgoCD) is optional — skipped automatically if you haven't created
+  `terraform/argocd/terraform.tfvars`
 - You can also run each phase individually if needed
 
 ---
@@ -94,8 +96,12 @@ Decide and reserve these IPs in your network **before starting**. None of these 
 | Master node 3 | `master_ip_addresses[2]` | `192.168.10.103` |
 | Worker node 1 | `worker_ip_addresses[0]` | `192.168.10.111` |
 | Worker node 2 | `worker_ip_addresses[1]` | `192.168.10.112` |
+| Worker node 3 | `worker_ip_addresses[2]` | `192.168.10.113` |
 | Control plane VIP | `control_plane_vip` | `192.168.10.100` |
-| Ingress VIP | (set in Cilium config) | `192.168.10.200` |
+| Ingress LB IP (Cilium pool) | `argocd_lb_ip_pool_cidr` (Phase 7) | `192.168.10.200/32` |
+
+Three workers is the recommended minimum — two will boot fine but leaves no
+headroom for cordon-drain during rolling worker upgrades.
 
 The VIPs must be **free IPs** — not allocated by DHCP and not assigned to any host.
 Reserve them in your router/DHCP server as exclusions before continuing.
@@ -244,10 +250,10 @@ vm_user                 = "ubuntu"
 
 # Node IPs — must match your IP plan
 master_ip_addresses = ["192.168.10.101", "192.168.10.102", "192.168.10.103"]
-worker_ip_addresses = ["192.168.10.111", "192.168.10.112"]
+worker_ip_addresses = ["192.168.10.111", "192.168.10.112", "192.168.10.113"]
 
 # RKE2
-rke2_version = "v1.29.4+rke2r1"
+rke2_version = "v1.32.10+rke2r1"
 rke2_cni     = "cilium"
 cluster_name = "rke2-prod"
 environment  = "production"
@@ -286,13 +292,11 @@ alertmanager_email_to  = "devops@yourcompany.com"
 alertmanager_smtp_host = "smtp.yourcompany.com"
 ```
 
-Also set in `rke2/configs/rke2-cilium-config.yaml`:
-
-```yaml
-ingressController:
-  service:
-    loadBalancerIP: "192.168.10.200"   # YOUR ingress VIP — must be a free IP
-```
+The Cilium ingress LB IP is **not** hardcoded in `rke2-cilium-config.yaml` —
+the IP is allocated dynamically in Phase 7 from a `CiliumLoadBalancerIPPool`.
+You'll set `argocd_lb_ip_pool_cidr` in `terraform/argocd/terraform.tfvars`
+(default `192.168.10.200/32`). Until Phase 7 runs the LB service `EXTERNAL-IP`
+stays `<pending>` — that's expected.
 
 ## 2.3 Export All Secrets
 
@@ -331,7 +335,7 @@ terraform apply cluster.tfplan
 **What Terraform does:**
 
 1. Creates 3 master VMs cloned from template
-2. Creates 2 worker VMs cloned from template
+2. Creates N worker VMs cloned from template (3 recommended)
 3. Formats etcd disk (`/dev/vdb`) on each master as ext4 → mounts at `/var/lib/rancher/rke2/server/db`
 4. Formats data disk (`/dev/vdb`) on each worker as XFS → mounts at `/var/lib/rancher`
 5. Applies kernel tuning (`vm.swappiness=0`, `inotify`, `bridge netfilter`) to all nodes
@@ -341,8 +345,9 @@ terraform apply cluster.tfplan
 ## 2.5 Verify VMs are Up
 
 ```bash
-# All VMs should be reachable via SSH
-for ip in 192.168.10.101 192.168.10.102 192.168.10.103 192.168.10.111 192.168.10.112; do
+# All VMs should be reachable via SSH (adjust the list to match your worker_count)
+for ip in 192.168.10.101 192.168.10.102 192.168.10.103 \
+          192.168.10.111 192.168.10.112 192.168.10.113; do
   ssh -i ~/.ssh/rke2_cluster_id -o StrictHostKeyChecking=no ubuntu@$ip \
     "echo $ip OK" 2>/dev/null || echo "$ip NOT READY"
 done
@@ -353,8 +358,8 @@ All should print `<IP> OK`.
 ## Phase 2 — Go / No-Go
 
 - [ ] `terraform apply` completed with 0 errors
-- [ ] All 5 VMs are `RUNNING` in Proxmox UI
-- [ ] All 5 VMs respond to SSH
+- [ ] All VMs (3 masters + N workers) are `RUNNING` in Proxmox UI
+- [ ] All VMs respond to SSH
 - [ ] `rke2/configs/inventory.ini` exists and lists all nodes
 
 ---
@@ -363,7 +368,7 @@ All should print `<IP> OK`.
 
 # Phase 3 — RKE2 Cluster Installation
 
-This phase installs RKE2 on all nodes, deploys kube-vip for HA, configures Cilium CNI, and installs Grafana Alloy as a systemd service on every VM.
+This phase installs RKE2 on all nodes, deploys kube-vip for HA, configures Cilium CNI (with L2 announcements + LoadBalancer IPAM flags enabled so Phase 7 can hand out LB IPs), and installs Grafana Alloy as a systemd service on every VM.
 
 ## 3.1 Make Scripts Executable
 
@@ -420,15 +425,16 @@ export KUBECONFIG=.secrets/kubeconfig-admin.yaml
 kubectl get nodes -o wide
 ```
 
-Expected output:
+Expected output (3 masters + 3 workers shown — yours scales with `worker_count`):
 
 ```
 NAME            STATUS   ROLES                       AGE   VERSION
-rke2-master-1   Ready    control-plane,etcd,master   8m    v1.29.4+rke2r1
-rke2-master-2   Ready    control-plane,etcd,master   5m    v1.29.4+rke2r1
-rke2-master-3   Ready    control-plane,etcd,master   3m    v1.29.4+rke2r1
-rke2-worker-1   Ready    <none>                      2m    v1.29.4+rke2r1
-rke2-worker-2   Ready    <none>                      1m    v1.29.4+rke2r1
+rke2-master-1   Ready    control-plane,etcd,master   8m    v1.32.10+rke2r1
+rke2-master-2   Ready    control-plane,etcd,master   5m    v1.32.10+rke2r1
+rke2-master-3   Ready    control-plane,etcd,master   3m    v1.32.10+rke2r1
+rke2-worker-1   Ready    worker                      2m    v1.32.10+rke2r1
+rke2-worker-2   Ready    worker                      1m    v1.32.10+rke2r1
+rke2-worker-3   Ready    worker                      1m    v1.32.10+rke2r1
 ```
 
 ```bash
@@ -443,12 +449,31 @@ ssh ubuntu@192.168.10.101 "systemctl is-active alloy"   # → active
 ssh ubuntu@192.168.10.111 "systemctl is-active alloy"   # → active
 ```
 
+## 3.5 Re-applying Cilium config later
+
+`install-master.sh` writes `rke2-cilium-config.yaml` to the init master during
+bootstrap — including the L2 announcements + LB IPAM flags. If you edit that
+file on a live cluster (e.g. flipping a Cilium feature flag), push it back with:
+
+```bash
+./rke2/scripts/apply-cilium-config.sh
+```
+
+This script SCPs the patched config to the init master, waits for the
+RKE2 `helm-controller` to reconcile, and force-restarts the cilium daemonset +
+operator (helm-controller will not restart pods on a values-only change).
+Idempotent — safe to re-run.
+
+For a fresh deploy this script is **not** needed; Phase 3 already does the same
+work.
+
 ## Phase 3 — Go / No-Go
 
-- [ ] All 5 nodes show `STATUS=Ready`
+- [ ] All nodes show `STATUS=Ready` (3 masters + your worker count)
 - [ ] Zero nodes show `NotReady` or `Unknown`
 - [ ] `kubectl get pods -n kube-system` — all pods Running (give Cilium 2–3 minutes)
 - [ ] `kubectl get ingressclass cilium` returns a result
+- [ ] `kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.enable-l2-announcements}'` returns `true`
 - [ ] `systemctl is-active alloy` returns `active` on at least one master and one worker
 - [ ] `.secrets/kubeconfig-admin.yaml` exists
 
@@ -674,9 +699,10 @@ export KUBECONFIG=.secrets/kubeconfig-admin.yaml
 kubectl get ingressclass cilium
 # Expected: cilium   cilium.io/ingress-controller   <date>
 
-# LoadBalancer service for the ingress (kube-vip assigns the IP)
+# LoadBalancer service for the ingress
 kubectl get svc -n kube-system -l app.kubernetes.io/name=cilium-ingress
-# Expected: EXTERNAL-IP = 192.168.10.200 (your ingress VIP)
+# Expected at end of Phase 6:   EXTERNAL-IP = <pending>   (no LB IP pool yet)
+# Expected after Phase 7:       EXTERNAL-IP = 192.168.10.200 (from CiliumLoadBalancerIPPool)
 
 # Hubble observability UI
 kubectl get pods -n kube-system -l app.kubernetes.io/name=hubble-ui
@@ -746,7 +772,8 @@ EOF
 # Wait for pod to be ready
 kubectl rollout status deployment/smoke-test -n staging
 
-# Test routing (add Host header to hit the ingress)
+# Test routing (skip until after Phase 7 has assigned an LB IP)
+# Once the EXTERNAL-IP is set:
 curl -H "Host: smoke-test.cluster.internal" http://192.168.10.200/
 # Expected: nginx welcome page HTML
 
@@ -757,9 +784,140 @@ kubectl delete -n staging deployment/smoke-test service/smoke-test ingress/smoke
 ## Phase 6 — Go / No-Go
 
 - [ ] `kubectl get ingressclass cilium` returns a result
-- [ ] Cilium ingress service has `EXTERNAL-IP = 192.168.10.200`
-- [ ] Smoke test curl returns HTTP 200 with nginx HTML
+- [ ] Cilium ingress service exists with `EXTERNAL-IP = <pending>` (the pool is created in Phase 7)
+- [ ] Ingress resource creation works (Cilium accepts the smoke-test Ingress)
 - [ ] Hubble UI and relay pods are Running
+
+---
+
+\newpage
+
+# Phase 7 — ArgoCD (GitOps Control Plane)
+
+**Optional but recommended.** Deploys ArgoCD into the cluster via Terraform.
+When `argocd_ingress_enabled = true` it also creates the resources that resolve
+the `<pending>` LoadBalancer left at the end of Phase 6:
+
+- `CiliumLoadBalancerIPPool` — the IP block Cilium allocates LB IPs from
+- `CiliumL2AnnouncementPolicy` — which nodes ARP-announce those IPs, on which NICs
+- `cert-manager` `Certificate` — TLS for the ArgoCD hostname
+- `Ingress` (class `cilium`) — routes `argocd.<your-domain>` to argocd-server
+
+The same IP pool is reused by any other LoadBalancer service in the cluster
+(Cilium runs in `ingress-default-lb-mode: shared` by default, so Hubble UI's
+ingress lands on the same IP via host-based routing).
+
+## 7.1 Configure ArgoCD tfvars
+
+```bash
+cd terraform/argocd
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Edit `terraform.tfvars`:
+
+```hcl
+kubeconfig_path  = "../../.secrets/kubeconfig-admin.yaml"
+cluster_name     = "rke2-prod"
+environment      = "production"
+
+argocd_namespace     = "argocd"
+argocd_chart_version = "7.7.0"
+
+# Topology — single replica is fine for early ops, flip to HA later
+argocd_ha_enabled          = false
+argocd_server_service_type = "ClusterIP"
+argocd_server_insecure     = true          # set true when argocd_ingress_enabled=true
+
+# ── Private Ingress (LB IP + L2 + Certificate + Ingress) ─────────────────────
+# Prereqs (already satisfied by Phase 3):
+#   - rke2-cilium-config.yaml has l2announcements + LB IPAM enabled
+# Client-side prereqs (do BEFORE flipping argocd_ingress_enabled=true):
+#   - Internal DNS A record: argocd.<your-domain> → <ingress LB IP>
+#   - Trust the cluster CA in your laptop trust store (same CA as Hubble UI)
+argocd_ingress_enabled       = true
+argocd_hostname              = "argocd.cluster.internal"
+argocd_cluster_issuer        = "cluster-ca-issuer"
+argocd_lb_ip_pool_cidr       = "192.168.10.200/32"
+argocd_lb_l2_interface_regex = "^(eth|ens|enp).*"
+```
+
+> Skip this whole phase by leaving `terraform.tfvars` absent — `deploy.sh` will
+> notice and skip Phase 7 cleanly. ArgoCD can be added later with
+> `./scripts/deploy.sh --only phase7`.
+
+## 7.2 Apply ArgoCD
+
+```bash
+cd terraform/argocd
+terraform init
+terraform validate
+terraform plan -out=argocd.tfplan
+terraform apply -auto-approve argocd.tfplan
+```
+
+Expected: `4 to add` (LB pool, L2 policy, Certificate, Ingress) plus the ArgoCD
+Helm release. Total time ~3–5 minutes.
+
+## 7.3 Verify
+
+```bash
+export KUBECONFIG=.secrets/kubeconfig-admin.yaml
+
+# LB IP pool allocated and not conflicting
+kubectl get ciliumloadbalancerippools.cilium.io
+# Expected: DISABLED=false  CONFLICTING=False
+
+# L2 announcement policy targets workers
+kubectl get ciliuml2announcementpolicies.cilium.io
+
+# cilium-ingress should now have a real EXTERNAL-IP
+kubectl -n kube-system get svc cilium-ingress
+# Expected: EXTERNAL-IP = 192.168.10.200 (from your pool CIDR)
+
+# Certificate issued by cluster-ca-issuer
+kubectl -n argocd get certificate argocd-server-tls
+# Expected: READY=True
+
+# Ingress has an address
+kubectl -n argocd get ingress argocd-server
+# Expected: ADDRESS = 192.168.10.200
+
+# ArgoCD pods all Running
+kubectl -n argocd get pods
+```
+
+## 7.4 First Login + Rotate Admin Password
+
+```bash
+# Day-1 admin password (auto-generated at install)
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d ; echo
+
+# Either port-forward (works without DNS/CA setup):
+kubectl -n argocd port-forward svc/argocd-server 8080:443 &
+# open https://localhost:8080  (Username: admin)
+
+# Or via Ingress once DNS + CA trust are in place:
+#   open https://argocd.cluster.internal
+```
+
+After logging in:
+
+1. Change the admin password via the UI (User Info → Update Password).
+2. Delete the bootstrap secret so it can't be re-read:
+   ```bash
+   kubectl -n argocd delete secret argocd-initial-admin-secret
+   ```
+
+## Phase 7 — Go / No-Go
+
+- [ ] All pods in the `argocd` namespace are `Running`
+- [ ] `kubectl -n kube-system get svc cilium-ingress` shows a real `EXTERNAL-IP` (no longer `<pending>`)
+- [ ] `kubectl get ciliumloadbalancerippools.cilium.io` shows `CONFLICTING=False`
+- [ ] `kubectl -n argocd get certificate argocd-server-tls` shows `READY=True`
+- [ ] You can log in to ArgoCD (port-forward or Ingress)
+- [ ] `argocd-initial-admin-secret` has been deleted after password rotation
 
 ---
 
@@ -776,8 +934,9 @@ cd <repo-root>
 source .secrets/env.sh    # or export them inline
 
 # 2. Ensure tfvars are filled in
-ls terraform/proxmox/terraform.tfvars       # must exist
-ls terraform/observability/terraform.tfvars # must exist
+ls terraform/proxmox/terraform.tfvars        # required
+ls terraform/observability/terraform.tfvars  # required
+ls terraform/argocd/terraform.tfvars         # optional — Phase 7 skipped if absent
 
 # 3. Run everything
 chmod +x scripts/deploy.sh
@@ -792,6 +951,9 @@ chmod +x scripts/deploy.sh
 
 # Run only one phase
 ./scripts/deploy.sh --only phase5
+
+# Add ArgoCD later (after Phases 2–6 have already succeeded)
+./scripts/deploy.sh --only phase7
 
 # Validate inputs without applying anything
 ./scripts/deploy.sh --dry-run
@@ -812,7 +974,7 @@ tail -f /tmp/deploy-<timestamp>.log
 
 # Post-Deployment Checklist
 
-Run these after all 6 phases pass their Go / No-Go gates.
+Run these after Phases 2–6 (and 7, if used) pass their Go / No-Go gates.
 
 ## Cluster Health
 
@@ -1035,11 +1197,15 @@ cd terraform/proxmox && terraform apply
 | `.secrets/kubeconfig-admin.yaml` | Admin kubectl access |
 | `.secrets/rke2-cluster-token` | Node join token — protect this |
 | `.secrets/ssh-key` | VM SSH private key |
-| `terraform/proxmox/terraform.tfvars` | All infrastructure variables |
+| `terraform/proxmox/terraform.tfvars` | All infrastructure variables (VMs, network) |
 | `terraform/observability/terraform.tfvars` | Mimir/Loki URLs and auth |
+| `terraform/argocd/terraform.tfvars` | ArgoCD + Ingress (Phase 7; optional) |
 | `rke2/configs/inventory.ini` | Auto-generated node list |
 | `rke2/configs/alloy-config.alloy.tpl` | Alloy template — edit to change telemetry |
-| `rke2/configs/rke2-cilium-config.yaml` | Cilium settings — IngressController, Hubble |
+| `rke2/configs/rke2-cilium-config.yaml` | Cilium settings — IngressController, Hubble, L2 announce, LB IPAM |
+| `rke2/scripts/apply-cilium-config.sh` | Push Cilium config changes to a live cluster |
+| `scripts/deploy.sh` | Orchestrator for Phases 2–7 |
+| `scripts/uninstall.sh` | Reverse of deploy.sh — interactive teardown |
 | `rbac/kubeconfigs/` | Team kubeconfigs — distribute securely |
 
 ## Files That Must NEVER Be Committed to Git
@@ -1048,6 +1214,7 @@ cd terraform/proxmox && terraform apply
 .secrets/
 terraform/proxmox/terraform.tfvars
 terraform/observability/terraform.tfvars
+terraform/argocd/terraform.tfvars
 *.pem  *.key  *.p12
 rbac/kubeconfigs/
 ```
@@ -1065,10 +1232,11 @@ Verify with: `git status --short` — these paths must not appear.
 | Phase 4 — Security | ~5 min |
 | Phase 5 — Observability | ~5–8 min |
 | Phase 6 — Verification | ~2 min |
-| **Total (Phases 2–6)** | **~35–50 min** |
+| Phase 7 — ArgoCD (optional) | ~3–5 min |
+| **Total (Phases 2–7)** | **~35–55 min** |
 
 ---
 
 *This runbook covers a clean first-time deployment. For scaling, upgrades, and backup procedures see the companion documents in `docs/`.*
 
-*Generated: 2026-05-13 | Cluster: rke2-prod*
+*Last updated: 2026-05-18 | Cluster: rke2-prod | RKE2 v1.32.10+rke2r1*

@@ -25,6 +25,24 @@ spec:
     # Full eBPF-based data plane — no kube-proxy process needed
     kubeProxyReplacement: true
 
+    # ── L2 Announcements ──────────────────────────────────────────────────────
+    # Lets Cilium answer ARP for LoadBalancer service IPs from an internal pool
+    # (CiliumLoadBalancerIPPool). Replaces MetalLB / kube-vip-services on bare
+    # metal. Requires kubeProxyReplacement=true (above). The pool + L2 policy
+    # are managed declaratively in terraform/argocd/ingress.tf.
+    l2announcements:
+      enabled: true
+      leaseDuration: 3s
+      leaseRenewDeadline: 1s
+      leaseRetryPeriod: 200ms
+
+    # Required when l2announcements is on: bump the k8s client rate limit so
+    # leader-election lease churn isn't throttled. Cilium's docs recommend ~10
+    # qps minimum for stable L2 leases.
+    k8sClientRateLimit:
+      qps: 10
+      burst: 20
+
     # API server endpoint for Cilium to contact (use the kube-vip VIP)
     # These are templated during install-master.sh — the script patches this file
     k8sServiceHost: "CONTROL_PLANE_VIP_PLACEHOLDER"

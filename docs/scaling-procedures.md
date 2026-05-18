@@ -4,17 +4,21 @@
 
 **No cluster disruption. Zero-downtime operation.**
 
+The deploy default is 3 workers — example below grows the cluster from 3 → 4.
+The procedure is the same for any single-node addition.
+
 ### 1. Update Terraform variables
 
 ```hcl
 # terraform/proxmox/terraform.tfvars
 
-worker_count = 3   # was 2
+worker_count = 4   # was 3
 
 worker_ip_addresses = [
   "192.168.10.111",
   "192.168.10.112",
-  "192.168.10.113",   # <── new node
+  "192.168.10.113",
+  "192.168.10.114",   # <── new node
 ]
 ```
 
@@ -117,17 +121,21 @@ terraform apply -target='module.prometheus_stack'
 ## Removing Worker Nodes
 
 ```bash
-# Step 1: Drain
-kubectl drain rke2-worker-2 --ignore-daemonsets --delete-emptydir-data
+# Step 1: Drain (use the actual node you want to remove — usually the highest-numbered)
+kubectl drain rke2-worker-4 --ignore-daemonsets --delete-emptydir-data
 
 # Step 2: Delete from cluster
-kubectl delete node rke2-worker-2
+kubectl delete node rke2-worker-4
 
 # Step 3: Update Terraform and apply (destroys VM)
-#   worker_count = 1
-#   Remove IP from worker_ip_addresses
+#   worker_count = 3      (decrement)
+#   Remove the matching IP from worker_ip_addresses
 terraform apply
 ```
+
+> **Note:** `terraform/proxmox` uses `count`-based modules, so removing a worker
+> only destroys the highest-indexed VM. Always remove from the *end* of the IP
+> list to avoid Terraform re-creating earlier-indexed nodes.
 
 ---
 

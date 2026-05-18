@@ -61,9 +61,9 @@ Terraform provisions the VMs, RKE2 installs masters then workers, kube-vip float
                             │  │ etcd │ │ etcd │ │ etcd │           │  (dedicated etcd disk)
                             │  └──────┘ └──────┘ └──────┘           │
                             │                                        │
-                            │  ┌──────┐ ┌──────┐                    │
-                            │  │ W-1  │ │ W-2  │  ◄── scale         │  2 × Workers
-                            │  └──────┘ └──────┘    horizontally
+                            │  ┌──────┐ ┌──────┐ ┌──────┐           │
+                            │  │ W-1  │ │ W-2  │ │ W-3  │  ◄── scale│  N × Workers
+                            │  └──────┘ └──────┘ └──────┘  horiz.   │  (3 recommended)
                             │                                        │
                             │  Cilium eBPF · WireGuard · Hubble
                             │  (replaces kube-proxy, ingress-nginx)
@@ -114,17 +114,22 @@ Terraform provisions the VMs, RKE2 installs masters then workers, kube-vip float
 - **Alertmanager** routes to Slack / PagerDuty / email
 - All telemetry carries `cluster`, `environment`, `node`, `role` labels — filter `cluster="rke2-prod"` in Grafana
 
-### 🤖 Automation — one command, six phases
+### 🤖 Automation — one command, seven phases
 | Phase | Step | Manual? |
 |------|------|:---:|
 | 1 | Proxmox API token + cloud-init template | ✅ |
-| 2 | Terraform → 3 masters + 2 workers | 🤖 |
-| 3 | RKE2 install + kube-vip + Cilium + Alloy on each VM | 🤖 |
+| 2 | Terraform → 3 masters + N workers (3 recommended) | 🤖 |
+| 3 | RKE2 install + kube-vip + Cilium (L2 announce + LB IPAM) + Alloy on each VM | 🤖 |
 | 4 | RBAC, NetworkPolicies, cert-manager, ESO, kubeconfigs | 🤖 |
 | 5 | Prometheus + Alertmanager (Helm via Terraform) | 🤖 |
 | 6 | Cilium IngressController + Hubble verification | 🤖 |
+| 7 | ArgoCD + (optional) Ingress, LB IP pool, cert | 🤖 |
 
 `./scripts/deploy.sh --from phaseN` resumes from a specific phase; `--only phaseN` runs one; `--dry-run` validates without applying.
+
+Phase 7 is optional — it self-skips if `terraform/argocd/terraform.tfvars` isn't present. Add ArgoCD later with `./scripts/deploy.sh --only phase7`.
+
+Reverse it all with `./scripts/uninstall.sh` (interactive, symmetric to deploy).
 
 ---
 
@@ -147,13 +152,17 @@ Terraform provisions the VMs, RKE2 installs masters then workers, kube-vip float
 
 ```
 infra-setup/
-├── scripts/deploy.sh            ← single-command deployment (Phases 2–6)
+├── scripts/
+│   ├── deploy.sh                ← single-command deployment (Phases 2–7)
+│   └── uninstall.sh             ← reverse of deploy.sh (interactive, --dry-run/--yes)
 ├── terraform/
 │   ├── proxmox/                 ← VM provisioning
-│   └── observability/           ← Prometheus + Alertmanager (Helm via TF)
+│   ├── observability/           ← Prometheus + Alertmanager (Helm via TF)
+│   └── argocd/                  ← ArgoCD + Ingress, LB IP pool, cert (Phase 7)
 ├── rke2/
-│   ├── scripts/                 ← install-master.sh, install-worker.sh, install-alloy.sh
-│   └── configs/                 ← audit-policy, Cilium HelmChartConfig,
+│   ├── scripts/                 ← install-master.sh, install-worker.sh, install-alloy.sh,
+│   │                              apply-cilium-config.sh (push Cilium changes to live cluster)
+│   └── configs/                 ← audit-policy, Cilium HelmChartConfig (L2 announce + LB IPAM),
 │                                  CoreDNS hosts-plugin HelmChartConfig, Alloy template
 ├── rbac/                        ← 4 role-based ClusterRoles + kubeconfig generator
 ├── security/
@@ -195,7 +204,7 @@ infra-setup/
 **Cluster defaults (all configurable):**
 - 3 master VMs: 4 vCPU / **8 GB RAM** / 50 GB OS + 20 GB etcd
   - *Note: 4 GB will deploy but Cilium + Hubble + control plane won't fit — see [`master_memory_mb`](docs/knowledge-base.md#key-proxmox-tfvars).*
-- 2 worker VMs: 8 vCPU / 16 GB RAM / 100 GB OS + 200 GB data
+- N worker VMs (3 recommended): 8 vCPU / 16 GB RAM / 100 GB OS + 200 GB data
 - Network: any /24 you specify
 - Pod CIDR: `10.42.0.0/16`, Service CIDR: `10.43.0.0/16`
 

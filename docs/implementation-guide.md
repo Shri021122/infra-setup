@@ -288,12 +288,12 @@ spec:
           port: 80
 ```
 
-**Set the ingress LoadBalancer IP** in `rke2/configs/rke2-cilium-config.yaml`:
-```yaml
-ingressController:
-  service:
-    loadBalancerIP: "192.168.10.200"   # Free IP in your subnet (kube-vip assigns it)
-```
+**The ingress LoadBalancer IP** is allocated dynamically by Cilium from a
+`CiliumLoadBalancerIPPool` (created in Phase 7 from
+`terraform/argocd/terraform.tfvars` → `argocd_lb_ip_pool_cidr`, default
+`192.168.10.200/32`). Don't hardcode `loadBalancerIP` in
+`rke2/configs/rke2-cilium-config.yaml` — the cilium-ingress Service will pick
+up the IP automatically once Phase 7 creates the pool.
 
 ## Implementation Order Summary
 
@@ -302,14 +302,16 @@ Phase 1: Proxmox Setup (MANUAL — one time only)
   └── Create API token
   └── Create Ubuntu 22.04 cloud-init template
 
-Phases 2–6: FULLY AUTOMATED
+Phases 2–7: FULLY AUTOMATED
   └── Single command: ./scripts/deploy.sh
 
   Phase 2: Terraform → Proxmox VMs
-  Phase 3: RKE2 install (masters → workers) + Cilium IngressController
+  Phase 3: RKE2 install (masters → workers) + Cilium (L2 announce + LB IPAM)
   Phase 4: RBAC + NetworkPolicies + cert-manager + ESO + kubeconfigs
   Phase 5: Prometheus + Alertmanager (→ your central Mimir); Alloy already on VMs
   Phase 6: Cilium IngressController verification (already deployed by RKE2)
+  Phase 7: ArgoCD + (optional) Ingress, LB IP pool, certificate
+           — self-skips if terraform/argocd/terraform.tfvars is absent
 ```
 
 ### Resume from a specific phase

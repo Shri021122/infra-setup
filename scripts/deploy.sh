@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ################################################################################
-# deploy.sh — Full Automated Deployment: Phases 2–6
+# deploy.sh — Full Automated Deployment: Phases 2–7
 #
 # Usage:
 #   ./scripts/deploy.sh                   # Full deployment
@@ -12,13 +12,17 @@
 #   - Proxmox API token created
 #   - Ubuntu 22.04 cloud-init template created
 #   - terraform.tfvars files filled in (see *.tfvars.example files)
+#     (terraform/argocd/terraform.tfvars is optional — see Phase 7 below)
 #   - SSH key for VM access available
 #
 # Phase 2: Terraform → Proxmox VMs
 # Phase 3: RKE2 cluster installation (masters → workers)
+#          Cilium config includes L2 announcements + LB IPAM (flags enabled,
+#          pool itself is created in Phase 7).
 # Phase 4: Security (namespaces, RBAC, NetworkPolicies, cert-manager, ESO, kubeconfigs)
 # Phase 5: Observability (Prometheus + Alertmanager via Terraform; Alloy already on VMs)
 # Phase 6: Verify Cilium IngressController (deployed by RKE2 automatically)
+# Phase 7: ArgoCD via Terraform + optional Ingress (LB IP pool + L2 policy + cert)
 ################################################################################
 
 set -euo pipefail
@@ -29,6 +33,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SECRETS_DIR="${ROOT_DIR}/.secrets"
 TERRAFORM_PROXMOX="${ROOT_DIR}/terraform/proxmox"
 TERRAFORM_OBS="${ROOT_DIR}/terraform/observability"
+TERRAFORM_ARGOCD="${ROOT_DIR}/terraform/argocd"
 RKE2_SCRIPTS="${ROOT_DIR}/rke2/scripts"
 RBAC_DIR="${ROOT_DIR}/rbac"
 SECURITY_DIR="${ROOT_DIR}/security"
@@ -52,7 +57,7 @@ success() { echo -e "${GREEN}${BOLD}✓ $*${NC}" | tee -a "$LOG_FILE"; }
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 START_PHASE=2
-END_PHASE=6
+END_PHASE=7
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -131,6 +136,12 @@ check_prerequisites() {
 
   [[ -f "${TERRAFORM_OBS}/terraform.tfvars" ]] || \
     err "Missing observability terraform.tfvars\n  cp ${TERRAFORM_OBS}/terraform.tfvars.example ${TERRAFORM_OBS}/terraform.tfvars\n  Then fill in your Mimir and Loki URLs."
+
+  # ArgoCD tfvars is optional — if absent we skip Phase 7 cleanly later.
+  if [[ ! -f "${TERRAFORM_ARGOCD}/terraform.tfvars" ]]; then
+    warn "No ${TERRAFORM_ARGOCD}/terraform.tfvars — Phase 7 (ArgoCD) will be skipped."
+    warn "  To enable: cp terraform.tfvars.example terraform.tfvars and edit."
+  fi
 
   # Proxmox auth: accept either the api_token (preferred) or the password.
   if [[ -z "${TF_VAR_proxmox_api_token:-}" && -z "${TF_VAR_proxmox_password:-}" ]]; then
@@ -441,6 +452,63 @@ EOF
   success "Phase 6 complete — Cilium IngressController active"
 }
 
+# ─── Phase 7: ArgoCD ──────────────────────────────────────────────────────────
+phase7_argocd() {
+  phase "Phase 7: ArgoCD — GitOps Control Plane"
+
+  export KUBECONFIG="${SECRETS_DIR}/kubeconfig-admin.yaml"
+
+  # Optional phase: skip cleanly if the user hasn't filled in tfvars.
+  if [[ ! -f "${TERRAFORM_ARGOCD}/terraform.tfvars" ]]; then
+    warn "No ${TERRAFORM_ARGOCD}/terraform.tfvars — skipping Phase 7."
+    warn "  To enable later: cp terraform.tfvars.example terraform.tfvars, edit,"
+    warn "  then run: ./scripts/deploy.sh --only phase7"
+    return 0
+  fi
+
+  cd "$TERRAFORM_ARGOCD"
+
+  log "Initializing ArgoCD Terraform..."
+  run terraform init -upgrade
+
+  log "Validating ArgoCD configuration..."
+  run terraform validate
+
+  log "Planning ArgoCD stack..."
+  run_visible terraform plan -out=argocd.tfplan
+
+  log "Applying ArgoCD stack (creates argocd namespace + Helm release;"
+  log "  optionally LB IP pool + L2 policy + Ingress if argocd_ingress_enabled=true)..."
+  log "  This may take 3–5 minutes..."
+  run_visible terraform apply -auto-approve argocd.tfplan
+
+  cd "$ROOT_DIR"
+
+  log "Waiting for argocd-server to be ready..."
+  kubectl wait --for=condition=Available deployment/argocd-server \
+    -n argocd --timeout=5m || warn "argocd-server not yet Available"
+
+  # If the Ingress path was enabled, the pool/policy/cert should exist now.
+  if kubectl get ciliumloadbalancerippools.cilium.io >/dev/null 2>&1 \
+     && [[ $(kubectl get ciliumloadbalancerippools.cilium.io -o name 2>/dev/null | wc -l) -gt 0 ]]; then
+    log "Verifying LB IP pool + L2 announcement policy..."
+    kubectl get ciliumloadbalancerippools.cilium.io
+    kubectl get ciliuml2announcementpolicies.cilium.io
+    kubectl -n kube-system get svc cilium-ingress \
+      -o custom-columns=NAME:.metadata.name,EXTERNAL-IP:.status.loadBalancer.ingress[0].ip
+  fi
+
+  # Print day-1 access instructions from the module's output
+  echo ""
+  terraform -chdir="$TERRAFORM_ARGOCD" output -raw argocd_access_instructions 2>/dev/null || true
+  echo ""
+  terraform -chdir="$TERRAFORM_ARGOCD" output -raw argocd_ingress 2>/dev/null || true
+  echo ""
+
+  success "Phase 7 complete — ArgoCD is up. Rotate the admin password and delete"
+  success "  argocd-initial-admin-secret as soon as you've logged in."
+}
+
 # ─── Final Summary ─────────────────────────────────────────────────────────────
 print_summary() {
   phase "Deployment Complete"
@@ -488,7 +556,7 @@ main() {
   ╦═╗╦╔═╔═╗  ╔═╗╦  ╦ ╦╔═╗╔╦╗╔═╗╦═╗
   ╠╦╝╠╩╗║╣   ║  ║  ║ ║╚═╗ ║ ║╣ ╠╦╝
   ╩╚═╩ ╩╚═╝  ╚═╝╩═╝╚═╝╚═╝ ╩ ╚═╝╩╚═
-  Automated Deploy: Phases 2–6
+  Automated Deploy: Phases 2–7
 BANNER
   echo -e "${NC}"
 
@@ -504,6 +572,7 @@ BANNER
   should_run 4 && phase4_security
   should_run 5 && phase5_observability
   should_run 6 && phase6_cilium_ingress
+  should_run 7 && phase7_argocd
 
   print_summary
 }
