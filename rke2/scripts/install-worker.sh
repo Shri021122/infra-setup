@@ -141,21 +141,15 @@ main() {
     kubectl --kubeconfig "${SECRETS_DIR}/kubeconfig-admin.yaml" get nodes -o wide
   fi
 
-  # Install Grafana Alloy on all worker nodes (OS-level, systemd service)
-  # Alloy collects: pod logs, journald, node metrics for each worker
+  # Install Grafana Alloy on every node — masters AND workers (OS-level, systemd).
+  # Alloy collects pod logs + journald + node metrics on every VM; on masters
+  # it also scrapes etcd. install-master.sh has no alloy step, so we cover the
+  # whole cluster here at the end of Phase 3.
   log ""
-  log "=== Installing Grafana Alloy on worker nodes ==="
+  log "=== Installing Grafana Alloy on every node (masters + workers) ==="
   # shellcheck source=install-alloy.sh
   source "${SCRIPT_DIR}/install-alloy.sh"
-
-  local in_workers=false
-  while IFS= read -r line; do
-    [[ "$line" =~ ^\[workers\] ]] && { in_workers=true; continue; }
-    [[ "$line" =~ ^\[ ]]         && { in_workers=false; continue; }
-    [[ "$in_workers" == false || -z "$line" ]] && continue
-    local node_ip; node_ip=$(echo "$line" | grep -oP 'ansible_host=\K[^ ]+')
-    install_alloy "$node_ip" "worker" "$SSH_USER" "$SSH_KEY"
-  done < "$INVENTORY"
+  install_alloy_all_nodes
 }
 
 main "$@"

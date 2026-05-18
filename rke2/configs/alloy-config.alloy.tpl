@@ -164,15 +164,22 @@ prometheus.exporter.unix "this_node" {
 
 prometheus.scrape "node_metrics" {
   targets         = prometheus.exporter.unix.this_node.targets
-  forward_to      = [prometheus.remote_write.central_mimir.receiver]
+  forward_to      = [prometheus.relabel.add_instance.receiver]
   scrape_interval = "15s"
   scrape_timeout  = "10s"
+}
 
-  // Add instance label matching the node name for Grafana compatibility
-  extra_metrics_relabel_rules = `
+// Add instance label = node hostname (for Grafana node-exporter dashboards).
+// Chained between the scrape and remote_write because Alloy ≥1.0 dropped the
+// inline `extra_metrics_relabel_rules` attribute on prometheus.scrape — you
+// pipe through a prometheus.relabel component now.
+prometheus.relabel "add_instance" {
+  forward_to = [prometheus.remote_write.central_mimir.receiver]
+
+  rule {
     target_label = "instance"
     replacement  = constants.hostname
-  `
+  }
 }
 
 // ── Kubernetes Component Metrics (masters only) ───────────────────────────────
