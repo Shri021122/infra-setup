@@ -236,11 +236,9 @@ check_prerequisites() {
   TF_VERSION=$(terraform version -json | jq -r '.terraform_version')
   log "  Terraform version: $TF_VERSION"
 
-  # Check tfvars files exist (not just examples)
-  [[ -f "${TERRAFORM_PROXMOX}/terraform.tfvars" ]] || \
-    err "Missing terraform.tfvars\n  cp ${TERRAFORM_PROXMOX}/terraform.tfvars.example ${TERRAFORM_PROXMOX}/terraform.tfvars\n  Then fill in your values."
-
-  # All tfvars now live under clusters/<name>/ — already validated at startup.
+  # Per-cluster tfvars live under clusters/<name>/ — already validated at
+  # script-start (cluster directory + proxmox.tfvars + observability.tfvars
+  # checked there). No need to re-check legacy terraform/<module>/terraform.tfvars.
   log "  Cluster:               ${CLUSTER_NAME}"
   log "  Cluster directory:     ${CLUSTER_DIR}"
   log "  Terraform state dir:   ${CLUSTER_TFSTATE_DIR}"
