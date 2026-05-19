@@ -368,6 +368,28 @@ phase3_rke2_install() {
   kubectl wait --for=condition=Ready pod -l k8s-app=cilium \
     -n kube-system --timeout=5m || warn "Cilium pods not yet Ready — may still be starting"
 
+  # ─── Pin the admin kubeconfig to the control-plane VIP ─────────────────────
+  # install-master.sh writes the init-master's direct IP into the kubeconfig
+  # (bootstrap-safe before kube-vip is ARPing). Now that the cluster is up and
+  # we've verified the VIP is reachable, swap the kubeconfig over so admin
+  # kubectl survives any single master failure.
+  local inventory="${ROOT_DIR}/rke2/configs/inventory.ini"
+  local vip
+  vip=$(grep '^control_plane_vip=' "$inventory" 2>/dev/null | head -1 | cut -d= -f2)
+  if [[ -n "$vip" ]] && ping -c1 -W2 "$vip" >/dev/null 2>&1; then
+    log "Pinning admin kubeconfig to control-plane VIP (${vip})..."
+    # Replace whatever :6443 server is currently in the kubeconfig with the VIP.
+    sed -i "s|server: https://[^:]*:6443|server: https://${vip}:6443|" "${CLUSTER_KUBECONFIG}"
+    sed -i "s|server: https://[^:]*:6443|server: https://${vip}:6443|" "${SECRETS_DIR}/kubeconfig-admin.yaml"
+    # Sanity-check: the new server URL works
+    kubectl --kubeconfig "${CLUSTER_KUBECONFIG}" get --raw=/version >/dev/null 2>&1 \
+      && success "  Admin kubeconfig now uses VIP ${vip} (HA admin access)" \
+      || warn "  VIP-pinned kubeconfig failed a smoke test — keep an eye on this"
+  else
+    warn "Control-plane VIP not reachable; leaving kubeconfig pointed at init master."
+    warn "  Admin kubectl will fail if the init master goes down."
+  fi
+
   success "Phase 3 complete — RKE2 cluster is up with Cilium CNI"
 }
 
