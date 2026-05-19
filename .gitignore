@@ -1,8 +1,11 @@
 # Secrets — NEVER commit these
 .secrets/
+# Per-cluster tfvars under clusters/ ARE the cluster definition — we WANT them
+# tracked. The `!` re-includes overrides the broad `*.tfvars` rule above.
+# (gitignore does not support inline `#` comments — keep them on their own line.)
 *.tfvars
 !*.tfvars.example
-!clusters/**/*.tfvars       # per-cluster tfvars ARE the cluster definition — tracked
+!clusters/**/*.tfvars
 *.pem
 *.key
 *.crt
