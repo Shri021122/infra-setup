@@ -204,17 +204,55 @@ git commit -m "feat(clusters): bootstrap <cluster-name>"
 git push                       # to feat/multi-cluster, or open an MR
 ```
 
-### 3.4 (Optional) Verify the IPs are actually free
+### 3.4 Pre-deploy sanity check (REQUIRED before every deploy or redeploy)
+
+Before pressing the deploy button — especially on production — run the
+read-only checker. It catches the common foot-guns (wrong cluster_name,
+IP collision with another cluster, ForceNew terraform plan, syntax errors).
 
 ```bash
-for ip in $(grep -oE '10\.[0-9]+\.[0-9]+\.[0-9]+' clusters/<cluster-name>/proxmox.tfvars | sort -u); do
-  ping -c1 -W1 $ip >/dev/null 2>&1 && echo "$ip IN USE — fix tfvars before deploy" \
-                                   || echo "$ip free"
-done
+./scripts/check-cluster.sh <cluster-name>
 ```
 
-Every IP should say `free`. If one is in use, edit the conflicting IP in
-`clusters/<cluster-name>/proxmox.tfvars` before deploying.
+What it does (all read-only, no infra changes):
+
+| # | Check | What it catches |
+|---|---|---|
+| 1 | Cluster directory + required tfvars exist | Forgot to run `new-cluster.sh`, or wrong cluster name |
+| 2 | `cluster_name` is consistent across all three tfvars | Typo in one file that would mis-label telemetry |
+| 3 | No IP / VM-ID collisions with OTHER clusters in `clusters/` | Two clusters fighting over the same address |
+| 4 | Each IP's reachability on the network (ping) | IP in use by something else; or expected to respond but doesn't |
+| 5 | `terraform validate` per module (HCL + var types) | Typo, missing variable, wrong type |
+| 6 | `terraform plan` per module — summary only | Anything `forces replacement` (would destroy + recreate VMs) |
+
+**Exit codes:**
+- `0` + green "ALL GREEN" → safe to deploy
+- `0` + yellow warnings → review, then deploy if expected
+- `1` + red fails → fix before deploying
+
+**Options:**
+```bash
+./scripts/check-cluster.sh <cluster-name>              # full check (slowest: ~30-60s)
+./scripts/check-cluster.sh <cluster-name> --skip-plan  # quick check (~2s, skips step 6)
+```
+
+For routine re-deploys with small tfvars edits, the full check is the most
+valuable — `terraform plan` is what catches "you accidentally bumped
+`master_vm_id_start` from 421 to 422 and now it wants to destroy all your
+masters".
+
+**Interpreting step 6's plan summary:**
+
+| Plan output | Meaning |
+|---|---|
+| `No changes. Your infrastructure matches the configuration.` | ✅ State and config agree. Re-running deploy is a true no-op. |
+| `Plan: N to add, 0 to change, 0 to destroy` | ✅ Adding new resources only (e.g. added a worker). |
+| `Plan: 0 to add, N to change, 0 to destroy` | ✅ In-place updates (e.g. tag change, RAM bump). |
+| `Plan: N to add, M to change, K to destroy` | ⚠️ Mixed. Read the destroy list before applying. |
+| Output contains `forces replacement` | 🛑 ForceNew field changed. Terraform will destroy + re-create. Investigate before applying. |
+
+If step 6 prints `Error: Unable to create Proxmox VE API credentials`, you
+forgot to export `TF_VAR_proxmox_api_token` — re-export and re-run the check.
 
 ### 3.5 Deploy
 
@@ -452,7 +490,123 @@ Slack/email.
 
 ---
 
-## 11. Quick reference card
+## 11. Manual verification commands (when the helper isn't enough)
+
+`check-cluster.sh` wraps the commands below — if you want to inspect things
+yourself, run any of these directly. All are read-only.
+
+### 11.1 Eyeball the cluster definition
+
+```bash
+cat clusters/<name>/proxmox.tfvars            # full proxmox config
+cat clusters/<name>/observability.tfvars      # Mimir/Loki + Prometheus sizing
+cat clusters/<name>/argocd.tfvars             # ArgoCD chart + Ingress
+
+# Or in one go
+less clusters/<name>/*.tfvars
+```
+
+### 11.2 Check IPs are free / in-use on the network
+
+```bash
+for ip in 10.30.0.100 10.30.0.101 10.30.0.102 10.30.0.103 \
+          10.30.0.111 10.30.0.112 10.30.0.113 10.30.0.200; do
+  ping -c1 -W1 $ip >/dev/null 2>&1 && echo "$ip in use" || echo "$ip free"
+done
+```
+- **Fresh deploy** → every IP should be `free`.
+- **Redeploy** → master/worker/VIP IPs should be `in use` (your VMs).
+
+### 11.3 Check for IP / VM-ID collisions across clusters
+
+```bash
+# IPs claimed by every cluster in the repo
+grep -hE '"10\.[0-9.]+"' clusters/*/proxmox.tfvars | sort | uniq -c | sort -rn | head
+# Any count > 1 = collision
+
+# VM ID ranges
+grep -E "_vm_id_start|_count" clusters/*/proxmox.tfvars
+# Cross-check: master_start..(master_start+master_count-1) shouldn't overlap
+#              worker_start..(worker_start+worker_count-1) of any other cluster
+```
+
+### 11.4 terraform validate per module (HCL syntax + variable types)
+
+```bash
+terraform -chdir=terraform/proxmox       validate
+terraform -chdir=terraform/observability validate
+terraform -chdir=terraform/argocd        validate
+# Each should print "Success! The configuration is valid."
+```
+
+If validate fails because providers aren't downloaded, run `terraform -chdir=terraform/<mod> init` first.
+
+### 11.5 terraform plan per module (the real "what would happen")
+
+```bash
+export TF_VAR_proxmox_api_token='terraform@pve!terraform=<UUID>'
+CLUSTER=<cluster-name>
+
+# Proxmox (VMs) — most important
+terraform -chdir=terraform/proxmox plan \
+  -var-file=../../clusters/${CLUSTER}/proxmox.tfvars \
+  -state=../../clusters/${CLUSTER}/tfstate/proxmox.tfstate
+
+# Observability (Prometheus + Alertmanager)
+terraform -chdir=terraform/observability plan \
+  -var-file=../../clusters/${CLUSTER}/observability.tfvars \
+  -state=../../clusters/${CLUSTER}/tfstate/observability.tfstate
+
+# ArgoCD
+terraform -chdir=terraform/argocd plan \
+  -var-file=../../clusters/${CLUSTER}/argocd.tfvars \
+  -state=../../clusters/${CLUSTER}/tfstate/argocd.tfstate
+```
+
+Look at the LAST few lines of each:
+
+| Plan output (last line) | Meaning |
+|---|---|
+| `No changes. Your infrastructure matches the configuration.` | ✅ Re-running deploy is a no-op |
+| `Plan: N to add, 0 to change, 0 to destroy` | ✅ Adding (e.g. new worker) |
+| `Plan: 0 to add, N to change, 0 to destroy` | ✅ In-place updates (RAM bump, tag change) |
+| `Plan: N to add, M to change, K to destroy` | ⚠️ Mixed — read the destroy list |
+| Output contains `forces replacement` | 🛑 ForceNew field changed — terraform will destroy + re-create |
+
+### 11.6 Inspect existing terraform state (what's deployed right now?)
+
+```bash
+CLUSTER=<cluster-name>
+
+# List all resources terraform thinks it owns
+terraform -chdir=terraform/proxmox state list \
+  -state=../../clusters/${CLUSTER}/tfstate/proxmox.tfstate
+
+# Look at one resource in detail
+terraform -chdir=terraform/proxmox state show \
+  -state=../../clusters/${CLUSTER}/tfstate/proxmox.tfstate \
+  'module.master_nodes[0].proxmox_virtual_environment_vm.master'
+
+# Get outputs (init master IP, VIP, all node IPs)
+terraform -chdir=terraform/proxmox output \
+  -state=../../clusters/${CLUSTER}/tfstate/proxmox.tfstate
+```
+
+### 11.7 Once-deployed: cluster health from kubectl
+
+```bash
+export KUBECONFIG=$PWD/clusters/<name>/kubeconfig.yaml
+
+kubectl get nodes -o wide                                       # all Ready
+kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded
+kubectl -n kube-system get svc cilium-ingress                   # EXTERNAL-IP allocated
+kubectl get ciliumloadbalancerippools.cilium.io                 # pool exists, CONFLICTING=False
+kubectl -n argocd get ingress,certificate                       # READY=True
+```
+
+---
+
+## 12. Quick reference card
 
 ```bash
 # Pre-flight (every fresh shell)
@@ -461,12 +615,14 @@ export TF_VAR_central_mimir_password='...'
 export TF_VAR_central_loki_password='...'
 
 # Lifecycle
-./scripts/new-cluster.sh <name>            # interactive wizard, writes tfvars
-./scripts/deploy.sh      <name>            # Phases 2–7
-./scripts/deploy.sh      <name> --from phaseN
-./scripts/deploy.sh      <name> --only phaseN
-./scripts/uninstall.sh   <name>            # interactive teardown
-./scripts/uninstall.sh   <name> --yes      # non-interactive
+./scripts/new-cluster.sh   <name>          # interactive wizard, writes tfvars
+./scripts/check-cluster.sh <name>          # pre-deploy sanity check (read-only)
+./scripts/check-cluster.sh <name> --skip-plan  # fast version (no terraform plan)
+./scripts/deploy.sh        <name>          # Phases 2–7
+./scripts/deploy.sh        <name> --from phaseN
+./scripts/deploy.sh        <name> --only phaseN
+./scripts/uninstall.sh     <name>          # interactive teardown
+./scripts/uninstall.sh     <name> --yes    # non-interactive
 
 # Use the cluster
 export KUBECONFIG=$PWD/clusters/<name>/kubeconfig.yaml
@@ -481,7 +637,7 @@ kubectl get nodes
 
 ---
 
-## 12. What's in Git, what isn't
+## 13. What's in Git, what isn't
 
 | Path | In Git? | Why |
 |---|---|---|
