@@ -419,8 +419,10 @@ phase4_security() {
 
   # 4d — cert-manager
   log "4d. Installing cert-manager..."
-  helm repo add jetstack https://charts.jetstack.io --force-update >> "$LOG_FILE" 2>&1
-  helm repo update >> "$LOG_FILE" 2>&1
+  helm repo add jetstack https://charts.jetstack.io --force-update >> "$LOG_FILE" 2>&1 \
+    || warn "  jetstack repo cache skipped (slow network — helm install below may still succeed)"
+  helm repo update >> "$LOG_FILE" 2>&1 \
+    || warn "  helm repo update skipped (slow network — continuing)"
 
   if helm status cert-manager -n cert-manager &>/dev/null; then
     log "  cert-manager already installed — upgrading..."
@@ -446,8 +448,10 @@ phase4_security() {
 
   # 4e — External Secrets Operator
   log "4e. Installing External Secrets Operator..."
-  helm repo add external-secrets https://charts.external-secrets.io --force-update >> "$LOG_FILE" 2>&1
-  helm repo update >> "$LOG_FILE" 2>&1
+  helm repo add external-secrets https://charts.external-secrets.io --force-update >> "$LOG_FILE" 2>&1 \
+    || warn "  external-secrets repo cache skipped (slow network — helm install below may still succeed)"
+  helm repo update >> "$LOG_FILE" 2>&1 \
+    || warn "  helm repo update skipped (slow network — continuing)"
 
   if helm status external-secrets -n external-secrets &>/dev/null; then
     run helm upgrade external-secrets external-secrets/external-secrets \
@@ -488,12 +492,17 @@ phase5_observability() {
   local var_file="${CLUSTER_DIR}/observability.tfvars"
   local state_file="${CLUSTER_TFSTATE_DIR}/observability.tfstate"
 
-  # Add Helm repos
-  log "Adding Helm repositories..."
-  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >> "$LOG_FILE" 2>&1
-  helm repo add grafana https://grafana.github.io/helm-charts --force-update >> "$LOG_FILE" 2>&1
-  helm repo update >> "$LOG_FILE" 2>&1
-  success "  Helm repos ready"
+  # Add Helm repos. These are CLI-side cache only — Terraform's helm provider
+  # fetches charts directly via repository URL inside helm_release. So if these
+  # time out (slow github.io fetch — index.yaml can be 6+ MB), continue. The
+  # terraform apply below will still work.
+  log "Pre-caching Helm repos (non-fatal — TF helm provider fetches directly)..."
+  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >> "$LOG_FILE" 2>&1 \
+    || warn "  prometheus-community repo cache skipped (slow network — continuing)"
+  helm repo add grafana https://grafana.github.io/helm-charts --force-update >> "$LOG_FILE" 2>&1 \
+    || warn "  grafana repo cache skipped (slow network — continuing)"
+  helm repo update >> "$LOG_FILE" 2>&1 \
+    || warn "  helm repo update skipped (slow network — continuing)"
 
   cd "$TERRAFORM_OBS"
 
