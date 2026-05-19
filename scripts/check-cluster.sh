@@ -98,16 +98,20 @@ step "3. Conflicts with OTHER clusters in clusters/"
 extract_provisioned_ips() {
   local cluster_dir="$1"
   {
-    # master_ip_addresses + worker_ip_addresses are multi-line HCL lists:
-    #   master_ip_addresses = [
-    #     "10.10.18.101",
-    #     "10.10.18.102",
-    #   ]
-    # awk picks lines BETWEEN `master_ip_addresses = [` and the closing `]`.
+    # master/worker_ip_addresses may be written as:
+    #   inline:   master_ip_addresses = ["10.x.y.1", "10.x.y.2"]   ← wizard's format
+    #   multi:    master_ip_addresses = [
+    #               "10.x.y.1",
+    #               "10.x.y.2",
+    #             ]                                                  ← hand-edited format
+    # State machine: enter in_list on the assignment line (and print it so
+    # inline IPs are captured); exit on the FIRST line containing `]`.
     awk '
-      /^[[:space:]]*(master|worker)_ip_addresses[[:space:]]*=[[:space:]]*\[/ { in_list=1; next }
-      in_list && /^[[:space:]]*\]/ { in_list=0 }
-      in_list { print }
+      /^[[:space:]]*(master|worker)_ip_addresses[[:space:]]*=/ { in_list=1 }
+      in_list {
+        print
+        if ($0 ~ /\]/) in_list = 0
+      }
     ' "$cluster_dir"/*.tfvars 2>/dev/null \
       | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"'
     # control_plane_vip (single string)
@@ -211,8 +215,27 @@ else
     warnmsg "Skipping proxmox plan; continuing with observability + argocd"
   fi
 
+  # Fresh-deploy detection: observability + argocd modules use the kubernetes
+  # provider, which tries to authenticate at PLAN time. On a fresh deploy
+  # there's no cluster + no kubeconfig yet — those plans will fail with
+  # "connection refused" or "kubeconfig: no such file". That's expected, NOT
+  # a check failure. Detect and skip cleanly.
+  fresh_deploy=false
+  if [[ ! -f "${CLUSTER_KUBECONFIG:-${CLUSTER_DIR}/kubeconfig.yaml}" ]]; then
+    fresh_deploy=true
+    echo "  (Detected fresh deploy — no kubeconfig yet at ${CLUSTER_DIR}/kubeconfig.yaml)"
+    echo "  observability + argocd plans will be skipped (they need a live cluster)."
+  fi
+
   for mod in proxmox observability argocd; do
     [[ -f "${CLUSTER_DIR}/${mod}.tfvars" ]] || continue
+
+    # Skip k8s-provider modules on fresh deploys — no point trying.
+    if $fresh_deploy && [[ "$mod" != "proxmox" ]]; then
+      warnmsg "    ${mod}: skipped (fresh deploy, no cluster API to plan against yet)"
+      continue
+    fi
+
     state_file="${TFSTATE_DIR}/${mod}.tfstate"
     plan_args=(-var-file="${CLUSTER_DIR}/${mod}.tfvars")
     [[ -f "$state_file" ]] && plan_args+=(-state="$state_file")
@@ -242,8 +265,14 @@ else
         warnmsg "    ${adds}, ${changes}, ${destroys} — review the destroy list before applying"
       fi
     elif echo "$summary" | grep -q "Error:"; then
-      fail "    plan errored — see: terraform -chdir=terraform/${mod} plan -var-file=... -state=..."
-      echo "$summary" | head -3 | sed 's/^/      /'
+      # Connection-refused / no-kubeconfig errors during fresh deploy are
+      # benign (we filtered above), but if we get here it's a real error.
+      if echo "$plan_output" | grep -qE "connect: connection refused|no such file or directory.*kubeconfig|Unable to load credentials"; then
+        warnmsg "    ${mod}: plan needs a live cluster — skip on fresh deploys"
+      else
+        fail "    plan errored — see: terraform -chdir=terraform/${mod} plan -var-file=... -state=..."
+        echo "$summary" | head -3 | sed 's/^/      /'
+      fi
     else
       warnmsg "    plan output unclear — run the command manually to inspect"
     fi
