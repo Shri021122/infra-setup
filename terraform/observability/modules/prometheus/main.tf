@@ -29,7 +29,7 @@ resource "helm_release" "kube_prometheus_stack" {
   name             = "kube-prometheus-stack"
   repository       = "https://prometheus-community.github.io/helm-charts"
   chart            = "kube-prometheus-stack"
-  version          = "58.2.2"    # Pin version; test upgrades in staging first
+  version          = "80.4.1"    # Pin version; test upgrades in staging first
   namespace        = var.namespace
   create_namespace = false
   timeout          = 600
