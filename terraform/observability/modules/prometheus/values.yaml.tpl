@@ -224,8 +224,14 @@ kubeStateMetrics:
 kube-state-metrics:
   metricLabelsAllowlist:
     - "pods=[*]"
-    - "deployments=[app,component]"
+    - "deployments=[*]"
+    - "statefulsets=[*]"
+    - "daemonsets=[*]"
+    - "namespaces=[*]"
     - "nodes=[*]"
+    - "horizontalpodautoscalers=[*]"
+    - "endpoints=[*]"
+    - "networkpolicies=[*]"
 
 # ─── Default Prometheus Rules ─────────────────────────────────────────────────
 defaultRules:
@@ -277,3 +283,29 @@ kubeScheduler:
 
 kubeProxy:
   enabled: false    # RKE2 uses kube-proxy replacement via Cilium
+
+# ─── Kubelet ──────────────────────────────────────────────────────────────────
+# Override the chart's default cAdvisorMetricRelabelings which drops
+# container_cpu_cfs_throttled_seconds_total along with a few others. We keep
+# the *_throttled_seconds_total (used for CPU throttling alerts and dashboards)
+# while still dropping the load_average / system / user variants which are
+# high cardinality and rarely useful at scale.
+kubelet:
+  enabled: true
+  serviceMonitor:
+    cAdvisorMetricRelabelings:
+      - sourceLabels: [__name__]
+        regex: container_cpu_(load_average_10s|system_seconds_total|user_seconds_total)
+        action: drop
+      - sourceLabels: [__name__]
+        regex: container_fs_(io_current|io_time_seconds_total|io_time_weighted_seconds_total|reads_merged_total|sector_reads_total|sector_writes_total|writes_merged_total)
+        action: drop
+      - sourceLabels: [__name__]
+        regex: container_memory_(mapped_file|swap)
+        action: drop
+      - sourceLabels: [__name__]
+        regex: container_(file_descriptors|tasks_state|threads_max)
+        action: drop
+      - sourceLabels: [__name__]
+        regex: container_spec.*
+        action: drop

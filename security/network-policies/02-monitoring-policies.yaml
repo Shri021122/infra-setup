@@ -19,12 +19,47 @@ spec:
     - Egress
     - Ingress
   egress:
-    # Scrape all namespaces (any port)
+    # Scrape all in-cluster pods across all namespaces (any port)
     - to:
         - namespaceSelector: {}
-    # Remote-write to central Mimir (HTTPS out)
+    # Outbound HTTPS — Mimir remote-write, Slack/PagerDuty webhooks, etc.
     - ports:
         - port: 443
+          protocol: TCP
+    # Mimir/Loki/Grafana on the observability subnet (HTTP)
+    - to:
+        - ipBlock:
+            cidr: 10.10.103.0/24
+      ports:
+        - port: 80
+          protocol: TCP
+    # kube-apiserver on the cluster subnet (via VIP or direct master IPs)
+    - to:
+        - ipBlock:
+            cidr: 10.10.120.0/24
+      ports:
+        - port: 6443
+          protocol: TCP
+    # Scrape control-plane + host-network metric endpoints on dealing nodes.
+    # Required because these are reached by node IP, not pod IP, so the
+    # "namespaceSelector: {}" rule above doesn't cover them.
+    - to:
+        - ipBlock:
+            cidr: 10.10.120.0/24
+      ports:
+        - port: 10250    # kubelet (+ /metrics/cadvisor, /metrics/probes)
+          protocol: TCP
+        - port: 10257    # kube-controller-manager
+          protocol: TCP
+        - port: 10259    # kube-scheduler
+          protocol: TCP
+        - port: 2381     # etcd metrics (etcd-expose-metrics: true)
+          protocol: TCP
+        - port: 9962     # cilium-agent
+          protocol: TCP
+        - port: 9963     # cilium-operator
+          protocol: TCP
+        - port: 9965     # hubble-metrics
           protocol: TCP
     # DNS
     - ports:

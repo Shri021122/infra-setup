@@ -45,6 +45,12 @@ etcd-snapshot-schedule-cron: "0 */6 * * *"   # Every 6 hours
 etcd-snapshot-retention: 10
 etcd-snapshot-dir: /var/lib/rancher/rke2/server/db/snapshots
 
+# Expose etcd's read-only metrics endpoint on :2381 so Prometheus can scrape it.
+# Plain HTTP, unauthenticated, no keys/values — only metrics + /health. Restrict
+# access at the network layer (NetworkPolicy / host firewall) if pods on the
+# cluster shouldn't be able to reach master node IPs.
+etcd-expose-metrics: true
+
 # Kube-apiserver hardening
 kube-apiserver-arg:
   - "audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log"
@@ -60,14 +66,19 @@ kube-apiserver-arg:
   - "tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
 
 # Kube-controller-manager hardening
+# bind-address=0.0.0.0 exposes the :10257 HTTPS metrics endpoint on all node
+# interfaces so Prometheus (kube-prometheus-stack ServiceMonitor) can scrape it.
+# The port is TLS + bearer-token authenticated — unauthenticated callers get 401.
 kube-controller-manager-arg:
+  - "bind-address=0.0.0.0"
   - "terminated-pod-gc-threshold=10"
   - "node-monitor-period=4s"
   - "node-monitor-grace-period=16s"
 
 # Kube-scheduler
+# Same reasoning as KCM: 0.0.0.0 exposes :10259 HTTPS metrics for Prometheus.
 kube-scheduler-arg:
-  - "bind-address=127.0.0.1"
+  - "bind-address=0.0.0.0"
 
 # Kubelet configuration
 kubelet-arg:
