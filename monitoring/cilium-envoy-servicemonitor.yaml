@@ -1,0 +1,62 @@
+################################################################################
+# Scrape Cilium IngressController's Envoy admin metrics (port 9964).
+#
+# Background:
+#   The cilium-agent pod exposes 4 ports — peer-service (4244), prometheus
+#   (9962, scraped by `cilium-agent` ServiceMonitor), hubble-metrics (9965,
+#   scraped by `hubble` ServiceMonitor), and envoy-metrics (9964, not scraped
+#   by any default ServiceMonitor).
+#
+#   The embedded Envoy is the one that powers Cilium's IngressController —
+#   it terminates TLS for every external HTTPS request to argocd /
+#   hubble UI / future Ingress backends. It's already running and emitting
+#   admin metrics; this ServiceMonitor just tells Prometheus to scrape them.
+#
+# Cost:
+#   - Zero impact on data path: this is a read-only HTTP GET to an admin
+#     endpoint every 30 seconds. No new pods, no new traffic redirection,
+#     no new privileges. Workload latency is unaffected.
+#   - ~5-10K extra time-series in Mimir (rough estimate for our 2-Ingress
+#     cluster). Trivial cardinality.
+#
+# What it unlocks:
+#   envoy_cluster_upstream_*, envoy_http_downstream_*, envoy_http_rq_*,
+#   envoy_server_*, envoy_listener_*, envoy_ssl_handshake_*, etc.
+#   Deeper L7 observability for the IngressController path: TLS handshake
+#   counts, connection-pool depth, upstream cluster health, retry attempts,
+#   per-route latency histograms.
+#
+# Note: this metric set is COMPLEMENTARY to Hubble's `hubble_http_*` metrics.
+#   Hubble exports L7 flow events (a request was made, status was X, latency
+#   was Y). Envoy admin metrics give the proxy-internal view (the upstream
+#   pool had Z connections, X TLS handshakes succeeded, etc.).
+################################################################################
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cilium-envoy
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack    # picked up by our Prometheus selector
+    app.kubernetes.io/name: cilium-envoy
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  endpoints:
+    - port: envoy-metrics
+      interval: 30s
+      honorLabels: true
+      # The Envoy admin endpoint emits metrics in Prometheus exposition format
+      # on http://<pod-ip>:9964/metrics (no TLS, internal-only).
+      path: /metrics
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - action: replace
+          targetLabel: job
+          replacement: cilium-envoy
