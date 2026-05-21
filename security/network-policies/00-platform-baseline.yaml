@@ -1,39 +1,53 @@
 ################################################################################
-# CiliumClusterwideNetworkPolicy — platform baseline: allow workload pods to
-# reach the kube-apiserver.
+# CCNP-1 — Platform baseline ALLOW egress (additive).
 #
-# History:
-#   - Originally created live via `kubectl apply` (not committed). Captured
-#     into IaC here on the same day we discovered it was breaking the Cilium
-#     IngressController.
-#   - The original used `endpointSelector: {}`. In Cilium, `{}` matches every
-#     endpoint identity — INCLUDING reserved identities like `ingress`, `host`,
-#     `world`, `remote-node`, `kube-apiserver` itself. The moment any policy
-#     with an egress rule selects an endpoint, that endpoint enters
-#     default-deny egress mode. Result: the IngressController (Envoy, source
-#     identity `ingress`) was only allowed to talk to kube-apiserver, so every
-#     other Ingress backend (argocd-server, hubble-ui, future apps) returned
-#     HTTP 403 "Access denied" at the Envoy layer.
+# Every pod in every namespace (including ones created later by the DevOps
+# team) automatically gets these allowances:
+#   - reach the kube-apiserver (RBAC still gates what it can actually do)
+#   - reach any other pod/service in the cluster (cross-namespace)
+#   - reach the host network of this and other nodes (kubelet:10250, etcd:2381,
+#     kube-controller-manager:10257, kube-scheduler:10259, prometheus scrapes,
+#     etc.)
+#   - resolve DNS via CoreDNS
 #
-# Fix:
-#   Use a selector that matches every real-pod endpoint but NOT reserved
-#   identities. Real pods always carry the `k8s:io.kubernetes.pod.namespace`
-#   label (Cilium injects it from the pod's namespace). Reserved identities
-#   do not. So `matchExpressions: [namespace Exists]` cleanly scopes the
-#   policy to workloads only.
+# enableDefaultDeny.egress=false is critical: without it, this CCNP would
+# force default-deny egress on every endpoint it selects (i.e. every pod),
+# silently breaking new namespaces.
+#
+# Tenant isolation between namespaces is NOT enforced here — pods in
+# webtrade can talk to pods in crm by default. If a specific app needs
+# stricter rules, the app team writes a per-app CiliumNetworkPolicy in
+# their own namespace with enableDefaultDeny.egress=true.
 ################################################################################
 apiVersion: cilium.io/v2
 kind: CiliumClusterwideNetworkPolicy
 metadata:
-  name: allow-pods-to-kube-apiserver
+  name: platform-baseline-egress
   labels:
     purpose: platform-baseline
-    description: every-pod-can-reach-the-api-server
+    description: every-pod-can-reach-cluster-internals-and-DNS
 spec:
   endpointSelector:
     matchExpressions:
       - key: k8s:io.kubernetes.pod.namespace
         operator: Exists
+  enableDefaultDeny:
+    egress: false
   egress:
+    # Anything inside the cluster — pods, services, nodes, the apiserver
     - toEntities:
+        - cluster
         - kube-apiserver
+        - host
+        - remote-node
+    # DNS lookups
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP

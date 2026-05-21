@@ -1,0 +1,40 @@
+################################################################################
+# CCNP-3 — Platform baseline INGRESS allow (additive).
+#
+# Every pod automatically accepts traffic from:
+#   - the Cilium IngressController (so external HTTPS routed to it works)
+#   - the in-cluster Prometheus (so /metrics scrapes work)
+#   - any pod in kube-system (for control-plane components like hubble-relay,
+#     metrics-server, snapshot-controller talking to apps)
+#
+# enableDefaultDeny.ingress=false keeps this additive — apps that want to
+# lock down further can add a per-app CNP with enableDefaultDeny.ingress=true
+# in their own namespace.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: platform-baseline-ingress
+  labels:
+    purpose: platform-baseline
+    description: every-pod-accepts-ingress-from-platform-components
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: k8s:io.kubernetes.pod.namespace
+        operator: Exists
+  enableDefaultDeny:
+    ingress: false
+  ingress:
+    # Cilium IngressController — external HTTP/S routed to backend pods
+    - fromEntities:
+        - ingress
+    # Prometheus scraping
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: monitoring
+            app.kubernetes.io/name: prometheus
+    # Any pod in kube-system (hubble-relay, metrics-server, etc.)
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
