@@ -228,12 +228,16 @@ prometheus.remote_write "central_mimir" {
     }
   }
 
-  // Labels attached to every metric from this node
+  // Labels attached to every metric from this node.
+  // Use `cluster_name` (NOT `cluster`) so node metrics align with the
+  // in-cluster Prometheus's external_labels (kube_prometheus_stack values
+  // set externalLabels.cluster_name=<cluster>). Single label across all
+  // metric sources lets dashboards filter consistently.
   external_labels = {
-    cluster     = "${CLUSTER_NAME}",
-    node        = constants.hostname,
-    environment = "${ENVIRONMENT}",
-    role        = "${NODE_ROLE}",   // "master" or "worker"
+    cluster_name = "${CLUSTER_NAME}",
+    node         = constants.hostname,
+    environment  = "${ENVIRONMENT}",
+    role         = "${NODE_ROLE}",   // "master" or "worker"
   }
 }
 
