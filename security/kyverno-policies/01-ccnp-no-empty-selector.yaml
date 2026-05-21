@@ -1,0 +1,58 @@
+################################################################################
+# Kyverno ClusterPolicy — block CiliumClusterwideNetworkPolicy resources with
+# an empty `endpointSelector: {}`.
+#
+# Backstory: this is the exact mistake that took down argocd/hubble UIs on
+# the dealing cluster on 2026-05-20. An empty `endpointSelector: {}` matches
+# every Cilium endpoint identity INCLUDING reserved ones (ingress, host,
+# world, kube-apiserver). The moment any policy with an egress rule selects
+# an endpoint, default-deny kicks in for that endpoint. Result: Cilium's
+# IngressController (source identity `ingress`) could only egress to
+# kube-apiserver, blocking every other Ingress backend.
+#
+# This policy starts in Audit mode (logs violations, doesn't block) so the
+# team can verify nothing else trips it before flipping to Enforce.
+################################################################################
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: ccnp-no-empty-endpoint-selector
+  annotations:
+    policies.kyverno.io/title: "CCNP endpointSelector must not be empty"
+    policies.kyverno.io/category: Cilium
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      CiliumClusterwideNetworkPolicy with `endpointSelector: {}` accidentally
+      forces default-deny egress on reserved identities (ingress, host,
+      world, kube-apiserver), silently breaking the Cilium IngressController
+      and other Cilium plumbing. Scope every CCNP with matchExpressions
+      (`k8s:io.kubernetes.pod.namespace` Exists) or matchLabels.
+spec:
+  # Start Audit, flip to Enforce once verified.
+  validationFailureAction: Audit
+  background: true            # also audit existing CCNPs and report
+  failurePolicy: Fail         # block if Kyverno itself errors (safe default for enforce)
+  rules:
+    - name: reject-empty-endpoint-selector
+      match:
+        any:
+          - resources:
+              kinds:
+                - CiliumClusterwideNetworkPolicy
+      validate:
+        message: >-
+          spec.endpointSelector must include at least one of `matchLabels`
+          or `matchExpressions`. An empty `{}` matches every endpoint
+          identity (including reserved: ingress / host / world /
+          kube-apiserver), which silently breaks the Cilium IngressController.
+          For "every workload pod" use:
+            matchExpressions:
+              - key: k8s:io.kubernetes.pod.namespace
+                operator: Exists
+        deny:
+          conditions:
+            any:
+              # endpointSelector is literally {} (no matchLabels, no matchExpressions)
+              - key: "{{ to_string(request.object.spec.endpointSelector) }}"
+                operator: Equals
+                value: "{}"
