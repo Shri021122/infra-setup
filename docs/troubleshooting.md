@@ -1,199 +1,171 @@
-# Troubleshooting Guide
+# Troubleshooting Guide (generic, repo-wide)
 
-## Cluster Health Quick Checks
+> **Scope:** generic troubleshooting that applies to any RKE2-on-Proxmox cluster built from this repo.
+> For **per-cluster incident response** with specific node IPs, services, and dashboards, see the
+> cluster-specific runbook:
+>
+> - **`dealing` cluster** → [`runbook-dealing.md`](./runbook-dealing.md)
+>
+> When in doubt during an incident on the `dealing` cluster, **open the runbook first** — it has
+> Symptoms / Diagnosis / Common causes / Remediation / Verification steps tailored to the actual
+> topology (VIP `10.10.120.138`, masters `.131-.133`, workers `.134-.136`, Mimir at
+> `mimir.stackflow.org`, Grafana alerts to Microsoft Teams).
+
+---
+
+## Cluster health — quick checks
 
 ```bash
-# Full cluster status
+# Run on any cluster, set KUBECONFIG first.
 kubectl get nodes -o wide
 kubectl get pods -A | grep -v "Running\|Completed"
 kubectl top nodes
 kubectl top pods -A --sort-by=memory | head -20
-
-# etcd health
-ETCD_POD=$(kubectl -n kube-system get pod -l component=etcd -o name | head -1)
-kubectl -n kube-system exec -it "$ETCD_POD" -- \
-  etcdctl endpoint health --cluster \
-  --cacert=/var/lib/rancher/rke2/server/tls/etcd/server-ca.crt \
-  --cert=/var/lib/rancher/rke2/server/tls/etcd/server.crt \
-  --key=/var/lib/rancher/rke2/server/tls/etcd/server.key
-
-# API server logs
-sudo journalctl -u rke2-server -f --since "10m ago" | grep -i error
-
-# kubelet logs on worker
-sudo journalctl -u rke2-agent -f --since "10m ago"
+kubectl get --raw '/readyz?verbose' | grep -v ok$
 ```
+
+For the dealing cluster, runbook-dealing.md has a more thorough "is anything wrong?" pass with 8
+ordered checks including Hubble drop verdicts and Prometheus scrape state.
 
 ---
 
-## Issue: Node Not Ready
+## Cluster-level incident pointers
 
-```bash
-# 1. Check node conditions
-kubectl describe node <node-name> | grep -A 20 "Conditions:"
+These all used to be in this file. They now live in the cluster runbook because they need
+cluster-specific commands and dashboards.
 
-# 2. Check kubelet
-ssh ubuntu@<node-ip> "sudo journalctl -u rke2-server -n 100 | tail -30"
+| Symptom | See |
+|---|---|
+| `kubectl` slow / apiserver returning 5xx / VIP unreachable | [`runbook-dealing.md` → IR-1: Apiserver slow or unreachable](./runbook-dealing.md) |
+| etcd alert firing / `etcd_server_has_leader == 0` / quota approaching | [`runbook-dealing.md` → IR-2: Etcd degraded](./runbook-dealing.md) |
+| A node shows `NotReady` | [`runbook-dealing.md` → IR-3: Node goes NotReady](./runbook-dealing.md) |
+| Pod is `CrashLoopBackOff` / `OOMKilled` / `Pending` | [`runbook-dealing.md` → IR-4: Pod CrashLooping / OOMKilled / Pending](./runbook-dealing.md) |
+| DNS resolution failing inside pods | [`runbook-dealing.md` → IR-5: DNS resolution failing](./runbook-dealing.md) |
+| Pod can't reach another pod / service / external endpoint | [`runbook-dealing.md` → IR-6: Pod can't reach another pod / service](./runbook-dealing.md) |
+| Certificate not renewing / TLS expired | [`runbook-dealing.md` → IR-7: Certificate renewal failed](./runbook-dealing.md) |
+| Prometheus stops writing to Mimir / gap in dashboards | [`runbook-dealing.md` → IR-8: Prometheus stops writing to Mimir](./runbook-dealing.md) |
+| kube-vip VIP not failing over | covered as part of IR-1 |
 
-# 3. Check disk pressure
-ssh ubuntu@<node-ip> "df -h && free -h"
+For a *new* cluster (not dealing), copy `runbook-dealing.md` as a starting template, replace the IPs and
+hostnames, and rename to `runbook-<cluster-name>.md`.
 
-# 4. Restart kubelet (last resort)
-ssh ubuntu@<node-ip> "sudo systemctl restart rke2-server"
-# or for workers:
-ssh ubuntu@<node-ip> "sudo systemctl restart rke2-agent"
-```
+---
 
-## Issue: etcd Leader Election Failing
+## Issues that stay here (repo-level / not per-cluster)
 
-```bash
-# Symptoms: API server returns 503, etcd logs show "lost leader"
-# Cause: Usually network partition or disk I/O starvation
+### Terraform apply fails against Proxmox
 
-# Check etcd disk latency
-ETCD_POD=$(kubectl -n kube-system get pod -l component=etcd -o name | head -1)
-kubectl -n kube-system exec "$ETCD_POD" -- \
-  etcdctl check perf \
-  --cacert=/var/lib/rancher/rke2/server/tls/etcd/server-ca.crt \
-  --cert=/var/lib/rancher/rke2/server/tls/etcd/client.crt \
-  --key=/var/lib/rancher/rke2/server/tls/etcd/client.key
-
-# If disk is too slow, the etcd disk (virtio1) may need to be moved to faster storage
-# Check in Prometheus: etcd_disk_wal_fsync_duration_seconds (should be <10ms p99)
-```
-
-## Issue: Pod Stuck in Pending
-
-```bash
-# Check why pod isn't scheduled
-kubectl describe pod <pod-name> -n <namespace>
-# Look for: "Insufficient cpu", "Insufficient memory", "node(s) didn't match..."
-
-# Check resource usage
-kubectl describe nodes | grep -A 5 "Allocated resources"
-
-# If PVC not binding:
-kubectl describe pvc <pvc-name> -n <namespace>
-kubectl get storageclass
-kubectl get pv
-```
-
-## Issue: Prometheus Not Scraping Targets
-
-```bash
-# Port-forward to Prometheus UI
-kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:9090 &
-# Open: http://localhost:9090/targets
-
-# Check ServiceMonitor
-kubectl get servicemonitor -A
-kubectl describe servicemonitor <name> -n monitoring
-
-# Common fix: label mismatch — ServiceMonitor selector must match Service labels
-kubectl get svc -n <namespace> --show-labels
-```
-
-## Issue: Alloy Not Sending Logs to Central Loki
-
-```bash
-# Check Alloy service on a specific VM (Alloy runs as systemd, not in Kubernetes)
-ssh <vm-user>@<node-ip> "systemctl status alloy"
-ssh <vm-user>@<node-ip> "journalctl -u alloy -n 100 --no-pager"
-
-# Check Alloy config
-ssh <vm-user>@<node-ip> "cat /etc/alloy/config.alloy"
-
-# Restart Alloy if needed
-ssh <vm-user>@<node-ip> "sudo systemctl restart alloy"
-
-# Verify logs reaching central Loki (query from central Grafana)
-# Explore → Loki → {cluster="rke2-prod", job="kubernetes-pods"}
-```
-
-## Issue: Grafana Dashboards Showing No Data
-
-```bash
-# 1. Verify data source connectivity in Grafana UI
-# Admin → Data Sources → Test
-
-# 2. Check if Prometheus has data
-kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:9090 &
-# Query: up{cluster="rke2-prod"}
-
-# 3. Check time range — Grafana defaults to "last 6 hours"
-# 4. Verify dashboard variable filters match actual label values
-```
-
-## Issue: Terraform Apply Fails on Proxmox Provider
+These are IaC-layer problems, not cluster-runtime problems. They happen during `terraform apply`,
+before you have a cluster at all.
 
 ```bash
 # Error: "400 Bad Request" on VM creation
-# Fix: Check vm_id is not already in use
-qm list  # Run on Proxmox host
+# Cause: vm_id already in use
+qm list   # On the Proxmox host — find a free range
 
 # Error: "connection refused" on SSH provisioner
-# Fix: VM hasn't finished cloud-init yet — increase timeout
-# In main.tf: timeouts { create = "30m" }
+# Cause: VM still finishing cloud-init
+# Fix: raise the create timeout in main.tf:
+#   timeouts { create = "30m" }
+# Or just re-run terraform apply once cloud-init has settled.
 
 # Error: "template not found"
-# Fix: Verify vm_template_id in tfvars matches your Proxmox template
-qm list | grep 9000
+# Cause: vm_template_id in tfvars doesn't match your Proxmox template
+qm list | grep <template-id>
+
+# Error: "permission denied" on Datastore action
+# Cause: API token role missing privileges
+# See `multi-cluster-runbook.md` for the full pveum role command
 ```
 
-## Issue: kube-vip VIP Not Responding
+### Alloy not sending logs/metrics to central Loki/Mimir
+
+Alloy runs as **systemd on the host** (not as a Kubernetes pod), so the diagnostic flow is host-level:
 
 ```bash
-# Check kube-vip DaemonSet
-kubectl get pods -n kube-system -l app=kube-vip-ds
-kubectl logs -n kube-system -l app=kube-vip-ds
+NODE_IP=10.10.120.131   # or whichever node
 
-# Verify VIP is assigned to an interface
-ssh ubuntu@192.168.10.101 "ip addr show eth0 | grep 192.168.10.100"
+ssh ubuntu@$NODE_IP "
+  sudo systemctl status alloy
+  sudo journalctl -u alloy -n 100 --no-pager | tail -50
+  sudo grep -E 'remote_write|external_labels' /etc/alloy/config.alloy | head -20
+"
 
-# kube-vip requires ARP to be working — check:
-arping -I eth0 192.168.10.100  # From another host on the same subnet
+# Restart Alloy
+ssh ubuntu@$NODE_IP "sudo systemctl reload alloy"   # SIGHUP, no metric/log gap
+ssh ubuntu@$NODE_IP "sudo systemctl restart alloy"  # full restart if reload didn't help
 
-# If VIP is missing: restart kube-vip on all masters
-kubectl rollout restart daemonset/kube-vip-ds -n kube-system
+# Verify data is arriving in central Loki / Mimir
+# In Grafana → Explore:
+#   Loki:  {cluster="dealing", job="kubernetes-pods"}
+#   Mimir: up{cluster_name="dealing"}
 ```
 
-## Issue: Certificate Expired
+> If the cluster sees Alloy logs/metrics under `cluster` instead of `cluster_name` (or vice versa),
+> see `cluster-handbook-dealing.md` §13 for the convention this repo uses.
+
+### Generic certificate rotation
+
+RKE2 auto-rotates kubelet / control-plane certs before expiry (`kubelet-arg: rotate-certificates=true`).
 
 ```bash
-# Check certificate expiry
-sudo /var/lib/rancher/rke2/bin/kubectl \
-  --kubeconfig /etc/rancher/rke2/rke2.yaml \
-  get csr
+# Check what certs RKE2 manages
+sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get csr
 
-# RKE2 auto-rotates certs before expiry (kubelet-arg: rotate-certificates=true)
-# Manual rotation if needed:
+# Manual full rotation (rare — only if RKE2 auto-rotation broke)
 sudo rke2 certificate rotate
 
-# For kubeconfig certs (generated by generate-kubeconfigs.sh):
-# Re-run the script — it generates new certs
-./rbac/scripts/generate-kubeconfigs.sh
+# For Kubernetes user kubeconfigs generated by generate-kubeconfigs.sh:
+./rbac/scripts/generate-kubeconfigs.sh   # re-issues all kubeconfigs
 ```
 
-## Useful Diagnostic Commands
+For **cert-manager-issued certs** on Ingress (`argocd.dealing.internal`, etc.) — that's a
+cert-manager flow, not an RKE2 flow. See IR-7 in the cluster runbook.
+
+---
+
+## Useful diagnostic commands (generic)
 
 ```bash
-# Resource usage per namespace
-kubectl resource-capacity --namespace --pods
+# Capacity overview per namespace
+kubectl resource-capacity --namespace --pods   # needs `kubectl-resource-capacity` plugin
 
-# Events sorted by time
+# All events, newest first
 kubectl get events -A --sort-by='.lastTimestamp' | tail -30
 
-# Check API server request latency
-kubectl get --raw /metrics | grep apiserver_request_duration_seconds
+# Per-job apiserver latency snapshot
+kubectl get --raw /metrics | grep apiserver_request_duration_seconds_bucket | tail -20
 
-# Network connectivity test between pods
+# Spin up a network-debug pod
 kubectl run nettest --image=nicolaka/netshoot --rm -it -- /bin/bash
-# Inside: curl <service-name>.<namespace>.svc.cluster.local
 
-# Capture pod network traffic (requires privilege)
+# Privileged node debug (mounts host /, lets you ip/iptables/journalctl)
 kubectl debug node/<node-name> -it --image=nicolaka/netshoot
 
-# etcd compaction (free space if quota is hit)
-ETCDCTL_API=3 etcdctl compact $(etcdctl endpoint status --write-out="json" | jq '.[0].Status.header.revision')
-ETCDCTL_API=3 etcdctl defrag
+# Etcd compact + defrag (free disk after high churn)
+ETCD_POD=$(kubectl -n kube-system get pod -l component=etcd -o name | head -1)
+kubectl -n kube-system exec "$ETCD_POD" -c etcd -- /bin/sh -c '
+  REV=$(etcdctl --cacert=/var/lib/rancher/rke2/server/tls/etcd/server-ca.crt \
+                --cert=/var/lib/rancher/rke2/server/tls/etcd/server-client.crt \
+                --key=/var/lib/rancher/rke2/server/tls/etcd/server-client.key \
+                endpoint status --write-out=json | python3 -c "import sys,json; print(json.load(sys.stdin)[0][\"Status\"][\"header\"][\"revision\"])")
+  etcdctl ... compact $REV
+  etcdctl ... defrag
+'
 ```
+
+> The RKE2 etcd image is distroless — `kubectl exec` may not find `/bin/sh`. If so, ssh to a master
+> and run `etcdctl` directly with `--endpoints=https://127.0.0.1:2379`.
+
+---
+
+## See also
+
+- [`runbook-dealing.md`](./runbook-dealing.md) — cluster-specific incident response (8 IRs + common ops + cheat sheet)
+- [`cluster-handbook-dealing.md`](./cluster-handbook-dealing.md) — what every component does (24 sections + port inventory)
+- [`workload-catalog-dealing.md`](./workload-catalog-dealing.md) — what's actually running where
+- [`policy-reviewer.md`](./policy-reviewer.md) — checklist before applying a NetworkPolicy/CNP/CCNP/Kyverno policy
+- [`backup-and-upgrade.md`](./backup-and-upgrade.md) — backup strategy + RKE2 upgrade procedure
+- [`scaling-procedures.md`](./scaling-procedures.md) — adding/removing nodes
+- [`multi-cluster-runbook.md`](./multi-cluster-runbook.md) — bootstrapping a new cluster from the repo
+- [`knowledge-base.md`](./knowledge-base.md) — repo-wide architecture reference
