@@ -9,6 +9,22 @@
 > normal / warning / critical for THIS cluster, here's what to check daily, here's where to start
 > when something looks off."
 
+## ★ Start here: the Overview dashboard
+
+There is now a single-pane-of-glass dashboard for daily monitoring:
+
+> **** — "Overview — dealing cluster"
+
+Open this every morning. 4 rows on one screen:
+- **Row 1 — status gauges (color-coded):** Nodes, Etcd Leader, Running Pods, API avg latency, Cluster CPU %, Cluster Memory %
+- **Row 2 — control plane trends:** Etcd disk latency + DB size, API request rate by code
+- **Row 3 — workload signals:** OOM events / restarts / CPU throttling by namespace
+- **Row 4 — networking:** Cilium drops by reason, HTTP responses by status
+
+If everything is green here, the cluster is healthy. If anything is amber/red, click the linked detail dashboard (top of page) and use §3 to drill into the specific panel.
+
+---
+
 ## 0. Cluster capacity (so the numbers below mean something)
 
 | | Total | Per-node avg |
