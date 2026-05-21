@@ -162,6 +162,7 @@ kubectl -n kube-system exec "$ETCD_POD" -c etcd -- /bin/sh -c '
 ## See also
 
 - [`runbook-dealing.md`](./runbook-dealing.md) — cluster-specific incident response (8 IRs + common ops + cheat sheet)
+- [`monitoring-playbook-dealing.md`](./monitoring-playbook-dealing.md) — how to read each dashboard, panel thresholds, daily checklist, RCA workflow
 - [`cluster-handbook-dealing.md`](./cluster-handbook-dealing.md) — what every component does (24 sections + port inventory)
 - [`workload-catalog-dealing.md`](./workload-catalog-dealing.md) — what's actually running where
 - [`policy-reviewer.md`](./policy-reviewer.md) — checklist before applying a NetworkPolicy/CNP/CCNP/Kyverno policy
