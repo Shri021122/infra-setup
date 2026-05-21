@@ -1,0 +1,50 @@
+################################################################################
+# CiliumClusterwideNetworkPolicy — allow CoreDNS to forward DNS queries to
+# upstream resolvers (outside the cluster).
+#
+# Backstory:
+#   The platform-baseline CCNP `allow-pods-to-kube-apiserver` selects every
+#   pod endpoint (via `k8s:io.kubernetes.pod.namespace Exists`) and allows
+#   ONLY egress to `kube-apiserver`. That puts every endpoint into default-
+#   deny egress mode, including CoreDNS.
+#   CoreDNS's Corefile has `forward . /etc/resolv.conf`, which points at the
+#   node's upstream DNS (8.8.8.8 in our case). Without this CCNP, CoreDNS
+#   can't reach upstream → it can only resolve cluster names + the `hosts`
+#   plugin's hardcoded entries → external hostnames like github.com don't
+#   resolve from pods.
+#
+# Scope of the exception:
+#   Only CoreDNS pods (label `k8s-app: kube-dns`). Only UDP/TCP port 53.
+#   Other pods are not affected by this CCNP.
+#
+# Security note:
+#   This opens the standard DNS-tunneling exfiltration vector (compromised
+#   pod → CoreDNS → forwards to upstream → attacker-controlled nameserver
+#   decodes). Mitigations to consider:
+#     1. Point CoreDNS at an internal DNS resolver instead of 8.8.8.8 (edit
+#        the rke2-coredns HelmChartConfig's Corefile) and narrow the CCNP
+#        `toEntities: [world]` to `toCIDR: [<internal-dns>/32]`.
+#     2. Add host-level / VLAN-level egress filtering at the network layer.
+#     3. Enable Hubble DNS visibility (CNP with `dns:` rules) to monitor
+#        outbound DNS query patterns — costs latency, default off here.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: allow-coredns-to-upstream
+  labels:
+    purpose: platform-baseline
+    description: coredns-forwards-external-name-resolution
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s-app: kube-dns           # CoreDNS pods
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
