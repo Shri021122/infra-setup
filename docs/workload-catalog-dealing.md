@@ -90,7 +90,7 @@
 | `cilium-operator` | 2 (HA) | Identity allocation, IPAM ops, garbage collection |
 | `hubble-relay` | 1 | Flow aggregator |
 | `hubble-ui` | 1 | Web UI for flow inspection |
-| `cilium-envoy` (DaemonSet) | 6 | L7 proxy (idle — no L7 visibility configured) |
+| Envoy (embedded in `cilium-agent` pod, not a separate DaemonSet in this version) | n/a | L7 proxy used by the Cilium IngressController (handles every external HTTPS request hitting `10.10.120.140`). Also used for workload-level L7 visibility *when* a CiliumNetworkPolicy with `http: []` / `dns: []` rules is in effect — that part is off today, so workload pod-to-pod HTTP is NOT parsed for metrics. |
 
 **Cluster mesh:** `cluster.name=dealing, cluster.id=1` — single-cluster today. Mesh requires explicit ClusterMesh configuration if/when added.
 
