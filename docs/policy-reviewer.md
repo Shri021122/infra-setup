@@ -7,6 +7,40 @@
 > and several UIs. We added a Kyverno rule to block that one specific footgun. This checklist exists
 > to catch the other 80% that no automation will catch for us.
 
+## The model you're working inside
+
+This cluster uses a **4-layer security model**. Know which layer your change belongs to:
+
+```
+Layer 1 — Switch ACLs (your network team owns)
+          VLAN-to-VLAN segmentation. Cross-VLAN ports allowlisted explicitly.
+          → THIS is the network-layer security boundary. The cluster trusts it.
+
+Layer 2 — Cluster-wide CCNPs (platform team owns; in security/network-policies/)
+          ONLY 2 additive policies, both with `enableDefaultDeny: false`:
+            • platform-baseline-egress   — every pod ↔ in-cluster + DNS + apiserver
+            • platform-baseline-ingress  — IngressController/Prometheus/kube-system → pods
+          These DON'T block anything. They grant common platform access.
+
+Layer 3 — Per-app CNPs (app team owns; in their own namespace)
+          Optional. Apps add their own CiliumNetworkPolicy when they need
+          tighter than baseline. To override, use `enableDefaultDeny.egress: true`.
+
+Layer 4 — App-level TLS / authn / authz (developers own)
+          mTLS, JWT, OAuth — defense in depth on top of network policy.
+```
+
+**Two consequences for any new policy you write:**
+
+1. **Don't try to block by CIDR at the cluster level.** Your switch already does VLAN-level
+   segmentation. Cluster CIDR blocks would either duplicate the switch (no value) or contradict
+   it (broken cross-VLAN traffic). We tried `except: [10.0.0.0/8]` on 2026-05-21 and broke legit
+   cross-VLAN egress. Deleted.
+
+2. **The 2 cluster-wide CCNPs are intentionally permissive.** They use `enableDefaultDeny: false`
+   so they grant access without forcing default-deny on every pod. Per-app CNPs with
+   `enableDefaultDeny: true` are how individual apps lock down.
+
 ## Before you `kubectl apply`
 
 Run through these questions. If any answer is unclear, write the answer into the policy YAML as a
@@ -35,11 +69,44 @@ For Kyverno ClusterPolicies, check `match` and `exclude`:
   an `exclude` block for `kube-system`, `kyverno`, `cilium-secrets`, and any other system namespace.
 - A policy without `exclude` is at risk of breaking platform components.
 
-### 3. Once this policy is applied, what *new* pods/identities become "default-deny"?
+### 3. Will this policy force default-deny on any pod?
 
-Every NetworkPolicy / CNP / CCNP with an **egress** block puts every endpoint it selects into
-default-deny egress. Same for ingress. If your policy selects more endpoints than you intend,
-you can break things you didn't even consider.
+In Cilium 1.14+, every CNP/CCNP has an implicit `enableDefaultDeny`. The default behavior:
+
+- For a CNP/CCNP with egress rules → `enableDefaultDeny.egress: true` (deny everything except listed)
+- For a CNP/CCNP with ingress rules → `enableDefaultDeny.ingress: true`
+- A policy with NO rules selects pods but doesn't enforce anything
+
+**For the dealing cluster's CCNPs (Layer 2), always set `enableDefaultDeny: false`.**
+We learned this on 2026-05-21 — a CCNP that selects every pod and forces default-deny is the broad
+sledgehammer that breaks every system pod the platform needs (DNS, ingress controller,
+metrics-server, hubble-relay, cert-manager → ACME, etc).
+
+```yaml
+spec:
+  endpointSelector: {...}
+  enableDefaultDeny:
+    egress: false      # ← critical for cluster-wide CCNPs
+    ingress: false     # ← (if it's an ingress policy)
+  egress:
+    - ...
+```
+
+**For per-app CNPs (Layer 3), use `enableDefaultDeny: true` deliberately** when you want a specific
+app locked down:
+
+```yaml
+# Example: payments app, only stripe.com over TLS allowed
+spec:
+  endpointSelector:
+    matchLabels:
+      app: payments
+  enableDefaultDeny:
+    egress: true     # ← deliberately deny everything else
+  egress:
+    - toFQDNs: [{matchPattern: "*.stripe.com"}]
+      toPorts: [{ports: [{port: "443", protocol: TCP}]}]
+```
 
 **Mental test:** "What's the smallest selector that captures only what I need? Why isn't *that* the
 selector?"
@@ -62,14 +129,20 @@ K8s NetworkPolicy `ipBlock` does NOT match Cilium's reserved identities. If you 
 egress to a *node IP*, use a CiliumNetworkPolicy with `toEntities`, not a K8s NetworkPolicy with
 `ipBlock`.
 
-### 5. Is there a default-deny baseline already in the namespace?
+### 5. Is there a default-deny baseline already in scope?
 
 ```bash
+# Cluster-wide
+kubectl get ccnp
+# Per-namespace
 kubectl get networkpolicy,cnp -n <namespace>
 ```
 
-If there's a `default-deny-all` already, any new policy you add is purely additive (allows extra
-egress/ingress on top of deny). If not, the namespace is default-allow except where you restrict.
+After the 2026-05-21 refactor, there is **no cluster-wide default-deny**. The 2 platform CCNPs
+are additive. Per-namespace default-deny only exists where an app team has explicitly added one.
+
+If you're adding a policy that selects all pods in a namespace and has `enableDefaultDeny: true`,
+**every pod in that namespace becomes default-deny** for that direction. Make sure that's intended.
 
 ### 6. Did you test in a non-prod namespace first?
 

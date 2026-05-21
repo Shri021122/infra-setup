@@ -32,6 +32,8 @@
 21. [RKE2 bundled add-ons](#21-rke2-add-ons)
 22. [Terraform & the IaC layout](#22-terraform-and-iac)
 23. [Pritunl jump server (the access path)](#23-pritunl)
+24. [Port and listener inventory](#24-port-and-listener-inventory)
+25. [End-to-end flows — "what happens step by step"](#25-end-to-end-flows--what-happens-step-by-step)
 
 ---
 
@@ -307,8 +309,39 @@ The metrics-scraping side of observability lives inside the cluster.
 
 ## 18. Network policy (K8s + Cilium)
 
-- **Who:** Security/platform team writes them. Cilium enforces them.
-- **What:** Rules about which pods/identities can talk to which other pods/identities/CIDRs. Three resource types in play:
+- **Who:** Platform team owns the cluster-wide CCNPs. App teams own per-app CNPs in their own namespaces. Network team owns VLAN ACLs at the switch.
+
+- **What:** A 4-layer security model. Each layer has a specific job; no layer tries to duplicate another's.
+
+  ```
+  Layer 1 — Switch VLAN ACLs (network team)
+           VLAN-to-VLAN segmentation. Explicit cross-VLAN port allowlist.
+           This is the network-layer security boundary.
+
+  Layer 2 — Cluster-wide CCNPs (platform team)
+           2 additive policies in `security/network-policies/`:
+             • platform-baseline-egress  — every pod ↔ in-cluster + DNS + apiserver
+             • platform-baseline-ingress — IngressController/Prometheus/kube-system → pods
+           Both use `enableDefaultDeny: false` so they're additive (allow-only,
+           never force default-deny on the pods they select).
+
+  Layer 3 — Per-app CNPs (app team, optional)
+           When an app needs tighter than baseline (e.g. payments → only stripe.com),
+           the app team adds a CiliumNetworkPolicy in their namespace with
+           `enableDefaultDeny.egress: true` and a narrow allowlist.
+
+  Layer 4 — App-layer TLS + authn (developers)
+           mTLS, JWT, OAuth. Defense in depth on top of network policy.
+  ```
+
+- **How:** Cilium agents compile every NetworkPolicy / CNP / CCNP into BPF programs in the kernel. Each packet at egress/ingress is checked in O(1) per rule. Cilium identifies the source and destination by *identity* (a hash of pod labels) — including reserved identities like `host`, `world`, `kube-apiserver`, `ingress`, `remote-node`. K8s NetworkPolicy `ipBlock` rules only match the `cidr` reserved identity, so K8s NetworkPolicy can't restrict cross-node-IP traffic — for that you need a CNP with `toEntities`.
+
+- **Why this shape:**
+  - **Switch ACLs already do segmentation.** Layering CIDR-blocks at the cluster level would either duplicate the switch (no value) or contradict it (broken cross-VLAN traffic). We tried it, broke things, undid it.
+  - **The cluster-wide CCNPs are intentionally permissive.** They grant common platform access (DNS, apiserver, in-cluster pod-to-pod) without forcing default-deny. This lets the DevOps team spin up new namespaces (`webtrader`, `crm`, `affiliate`, …) without writing any netpols.
+  - **Per-app tightening is opt-in, app-team-owned.** Each app decides if it needs tighter than baseline. No central bottleneck for new policy additions.
+
+- **Resource types in play:**
 
   | Resource | Scope | Capability |
   |---|---|---|
@@ -316,11 +349,7 @@ The metrics-scraping side of observability lives inside the cluster.
   | `cilium.io/v2 CiliumNetworkPolicy` (CNP) | Namespace | L3/L4/L7 (HTTP method/path, DNS query patterns). Matches identities. |
   | `cilium.io/v2 CiliumClusterwideNetworkPolicy` (CCNP) | Cluster | Same as CNP but global. |
 
-- **How:** Whichever resources select a pod, that pod enters default-deny for the directions declared (ingress or egress). Each rule's `to`/`from` clause adds an allowance. The CNI's BPF programs evaluate matches in O(1).
-
-- **Why:** Defense in depth. Even if a pod is compromised, it can only talk where policy allows. Critical when running multi-tenant or production workloads.
-
-**The big footgun:** an empty selector (`{}`) matches every endpoint including reserved identities (`ingress`, `host`, `world`, `kube-apiserver`). Use `matchExpressions: [{key: k8s:io.kubernetes.pod.namespace, operator: Exists}]` to match all real pods but skip reserved identities. See [`policy-reviewer.md`](./policy-reviewer.md).
+- **The footgun to avoid:** an empty selector (`{}`) matches every endpoint including reserved identities (`ingress`, `host`, `world`, `kube-apiserver`). Use `matchExpressions: [{key: k8s:io.kubernetes.pod.namespace, operator: Exists}]` to match all real pods but skip reserved identities. Kyverno now blocks `{}` in CCNPs ([`policy-reviewer.md`](./policy-reviewer.md)).
 
 ---
 
@@ -535,7 +564,290 @@ kubectl -n kube-system exec $AGENT -c cilium-agent -- hubble observe --verdict D
 
 ---
 
-## Glossary (one-liners)
+## 25. End-to-end flows — "what happens step by step"
+
+This section walks through the most common traffic flows on this cluster. Use it to explain to
+someone else how the cluster actually works. Each flow:
+- Starts with the user's intent
+- Lists every hop, with the source IP, destination IP, port, and the component doing the work
+- Ends with "what happens" in plain English
+
+### 25.1 An external user opens `https://argocd.dealing.internal`
+
+What the user wants: the ArgoCD UI in their browser.
+
+```
+1. Browser ─DNS─▶ resolver returns 10.10.120.140
+   • The user is on the corporate network. Internal DNS (or their /etc/hosts) maps
+     argocd.dealing.internal → 10.10.120.140.
+
+2. Browser ─TCP/443─▶ 10.10.120.140
+   • 10.10.120.140 is the Cilium IngressController LB IP.
+   • Cilium's L2 announcements have ARP'd this IP from one of the dealing nodes
+     (leader election picks one cilium-agent — let's say dealing-w-1).
+   • The corporate switch routes the TCP SYN to dealing-w-1.
+
+3. dealing-w-1 NIC ─▶ Cilium-Envoy (embedded in cilium-agent pod, port 9964 is its
+                                     admin port; 80/443 is the IngressController listener)
+   • Envoy accepts the TLS handshake and terminates TLS using argocd-server-tls
+     (issued by cluster-ca-issuer in cert-manager).
+
+4. Envoy reads the HTTP Host header = "argocd.dealing.internal"
+   • Looks up its compiled config (built from the Ingress resource in argocd ns).
+   • Finds: route → argocd-server.argocd.svc.cluster.local on port 80.
+
+5. Envoy ─HTTP/80─▶ Service IP 10.43.172.88 (argocd-server)
+   • Cilium kube-proxy-replacement (BPF) translates the Service IP to one of the
+     argocd-server pod IPs (e.g. 10.42.4.X on dealing-w-1).
+   • Pod traffic uses WireGuard encryption between nodes (here, same node so no WG).
+
+6. argocd-server pod (port 8080 inside the container) serves the HTML/JS.
+
+7. Response retraces steps 5 → 4 → 3 → 2 → 1.
+```
+
+**Key ports:** 443 (external HTTPS), 80 (Envoy → backend), 8080 (argocd-server container).
+
+### 25.2 A pod calls an external API (e.g., `https://api.github.com`)
+
+```
+1. App pod (10.42.4.x) ─DNS query─▶ CoreDNS (10.43.0.10:53 UDP)
+   • DNS is allowed by CCNP-1 (platform-baseline-egress).
+
+2. CoreDNS ─?─▶ resolves
+   • If hostname matches CoreDNS's `hosts` plugin (e.g. mimir.stackflow.org), return locally.
+   • Otherwise, forward via `forward . /etc/resolv.conf` — which inside the CoreDNS pod points
+     to the node's resolv.conf — which points to 8.8.8.8 (Google DNS).
+   • CoreDNS sends the upstream query out (8.8.8.8:53). Switch ACL allows public DNS.
+   • Reply comes back: api.github.com → 140.82.x.x.
+
+3. App pod ─TCP/443─▶ 140.82.x.x (api.github.com)
+   • This is "world" identity in Cilium. K8s default-allow lets it through; no CCNP blocks it.
+   • Cilium BPF on the node routes the packet to eth0 with NAT (source rewritten to node IP
+     for the external trip).
+
+4. Switch routes the packet out to the public internet via the cluster's gateway.
+
+5. Response comes back via the same path; Cilium un-NATs on receive; delivers to the pod.
+```
+
+**Key ports:** 53/UDP (DNS), 443/TCP (HTTPS to external).
+
+### 25.3 A pod calls Mimir at `10.10.103.203` (cross-VLAN internal)
+
+Same start as 25.2 but the destination is a known internal IP. The path that matters:
+
+```
+1. App pod ─DNS─▶ CoreDNS hosts plugin: mimir.stackflow.org → 10.10.103.203 (no upstream lookup).
+2. App pod ─HTTP/80─▶ 10.10.103.203 (Mimir gateway)
+3. Cilium BPF, no policy block (CCNP-1 covers nothing about CIDR; no DENY policies exist).
+4. Switch fabric: the dealing VLAN (10.10.120.0/24) → observability VLAN (10.10.103.0/24).
+   The switch ACL between these VLANs explicitly allows port 80.
+5. Mimir gateway receives the remote_write payload.
+```
+
+**Key port:** 80/TCP (HTTP to Mimir's `/api/v1/push` endpoint with `X-Scope-OrgID: dealing`).
+
+### 25.4 Prometheus (in-cluster) scrapes kubelet metrics on every node
+
+```
+1. Prometheus pod (10.42.4.11 on dealing-w-1) wakes every 30s.
+   • Reads ServiceMonitor "kube-prometheus-stack-kubelet" → 6 scrape targets (one per node).
+
+2. Prometheus pod ─HTTPS/10250─▶ 10.10.120.131-136 (the 6 dealing nodes)
+   • Source: 10.42.4.11 (pod IP). Destination: node IP on port 10250.
+   • Cilium identifies destination as `host` (own node) or `remote-node` (other nodes).
+   • CCNP-1 allows this via `toEntities: [host, remote-node]`.
+
+3. Cilium WireGuard between nodes: pod traffic on the underlay is WG-encrypted.
+
+4. kubelet on each node receives, authenticates via Bearer token from Prometheus's SA,
+   responds with metrics from /metrics, /metrics/cadvisor, /metrics/probes.
+
+5. Prometheus pod appends to local TSDB (~2h cache).
+
+6. Prometheus pod ─HTTP/80─▶ 10.10.103.203/api/v1/push (Mimir, every 30s of remote-write)
+   • Same path as 25.3.
+```
+
+**Key ports:** 10250/TCP (kubelet HTTPS metrics), 80/TCP (remote-write to Mimir).
+
+### 25.5 Alloy (systemd on each host) scrapes node-level metrics
+
+```
+1. Alloy on dealing-m-1 (running as systemd, NOT a pod):
+   • `prometheus.exporter.unix` collects CPU, memory, disk, network from /proc, /sys.
+   • Listens on 127.0.0.1:12345 internally.
+
+2. Alloy ─scrapes─▶ itself (loopback)
+   • `prometheus.scrape "node_metrics"` reads from the local exporter every 15s.
+
+3. Alloy ─HTTP/80─▶ mimir.stackflow.org/api/v1/push
+   • External labels include cluster_name=dealing, node=dealing-m-1, environment=production.
+   • Switch routes cross-VLAN.
+
+4. Mimir ingests. Tagged with cluster_name="dealing".
+```
+
+**Key port:** 80/TCP (Alloy → Mimir). Alloy never touches the Kubernetes network — it's
+fully outside the cluster, talks directly to upstream Mimir.
+
+### 25.6 A pod logs something → it ends up in Loki
+
+```
+1. App pod writes to stdout/stderr.
+2. containerd captures the streams and writes to /var/log/pods/<ns>_<pod>_<uid>/<ctr>/<n>.log
+   (the standard CRI log location).
+3. Alloy on that node:
+   • `loki.source.file` tails /var/log/pods/**/*.log.
+   • `stage.cri` parses the CRI log format (extracts stream, flags, log fields).
+   • `stage.regex` extracts namespace/pod/container from the file path.
+4. Alloy ─POST─▶ loki.stackflow.org/loki/api/v1/push
+   • Labels added: cluster, node, namespace, pod, container, stream.
+5. Loki ingests, indexes labels, stores log bodies in object storage.
+6. You query in Grafana Explore → Loki: {namespace="webtrader"} |= "error".
+```
+
+**Key port:** typically 80/TCP (Loki HTTP push API).
+
+### 25.7 An image pull (when a new pod is scheduled)
+
+This is the path that does NOT go through Cilium policy — it's host-level by containerd, not
+by the pod.
+
+```
+1. Scheduler decides pod will run on dealing-w-1.
+2. kubelet on dealing-w-1 reads pod spec → "image: ghcr.io/example/app:v1.2.3"
+3. kubelet asks containerd to pull the image.
+4. containerd on dealing-w-1:
+   • Reads /etc/containerd/config.toml for registry mirrors / auth.
+   • Resolves ghcr.io via the HOST's DNS resolver (not CoreDNS).
+   • TLS handshake to ghcr.io:443.
+5. Switch routes outbound to the internet.
+6. containerd unpacks the image to /var/lib/rancher/rke2/agent/containerd/.
+7. kubelet starts the container.
+```
+
+**Key port:** 443/TCP (host-level pull). **No Cilium policy applies** — this is host-network
+traffic, not pod-network.
+
+### 25.8 A Grafana alert fires → reaches Microsoft Teams
+
+```
+1. Grafana (at 10.10.103.203:3000) evaluates alert rules every minute.
+2. Alert rule queries Mimir (PromQL) — same machine, internal call.
+3. Condition met (e.g. "Cluster CPU > 85% for 10m").
+4. Grafana's contact point: Microsoft Teams Workflows webhook URL.
+5. Grafana ─HTTPS/443─▶ <teams-workflow-webhook-url>
+   • Posts a JSON payload.
+6. Teams renders the alert as a card in the configured channel.
+7. On-call human sees it, opens runbook-dealing.md or the dashboard the alert linked.
+```
+
+**Key port:** 443/TCP (Grafana → Teams Workflows webhook). Grafana lives outside the cluster
+so this never touches Cilium.
+
+### 25.9 `kubectl apply` from an admin's laptop
+
+```
+1. Admin runs `kubectl get pods`.
+2. kubectl reads ~/.kube/config → server URL is https://10.10.120.138:6443.
+   • 10.10.120.138 is the kube-vip-owned control-plane VIP.
+
+3. Laptop ─TCP/6443─▶ 10.10.120.138 (via VPN, Pritunl)
+   • The switch routes to whichever dealing master currently holds the VIP.
+   • kube-vip leader-elected daemon on that master answers ARP for 10.10.120.138.
+   • The TCP packet hits kube-apiserver on that master.
+
+4. kube-apiserver:
+   • TLS handshake with client cert from kubeconfig.
+   • Authenticates the user (system:masters group via cert CN).
+   • Authorizes via RBAC.
+   • For a GET: reads from its in-memory cache OR queries etcd at https://127.0.0.1:2379.
+   • For a CREATE/UPDATE: validates, applies admission webhooks (Kyverno, cert-manager,
+     prom-operator), then writes to etcd. etcd Raft replicates to the other 2 members
+     (port 2380).
+   • Returns response to the caller.
+
+5. kubectl prints the response.
+```
+
+**Key ports:** 6443/TCP (kube-apiserver mTLS), 2379/TCP (etcd client), 2380/TCP (etcd peer).
+
+### 25.10 A worker pod sends a packet to another worker pod (different node)
+
+The case Cilium's data plane was built for.
+
+```
+1. Source pod (10.42.4.11 on dealing-w-1) ─TCP/8080─▶ Destination pod (10.42.5.42 on dealing-w-2)
+2. Cilium BPF on dealing-w-1:
+   • Looks up destination IP in the ipcache map → identity: dealing-w-2's pod identity.
+   • Checks egress policy in the BPF policy map → allowed (CCNP-1, default-allow).
+   • Routes packet via cilium_wg0 (WireGuard interface) — pod-to-pod traffic between nodes
+     is encrypted.
+3. WireGuard wraps the packet, ships out eth0 to dealing-w-2's eth0 (UDP/51871).
+4. dealing-w-2 cilium_wg0 decrypts → packet appears with source 10.42.4.11, dest 10.42.5.42.
+5. Cilium BPF on dealing-w-2:
+   • Checks ingress policy on the destination → allowed (CCNP-3, ingress from kube-system
+     and intra-cluster; CCNP-1 has no ingress rule but doesn't deny).
+   • Delivers to the destination pod's veth.
+6. Destination pod's kernel hands the TCP segment to the application listening on 8080.
+```
+
+**Key ports:** application port (varies — 8080 in example), 51871/UDP (WireGuard transport).
+
+### 25.11 End-to-end flow for a new "webtrader" app (the full user path)
+
+This brings it all together. Imagine DevOps deploys a webtrader app and a user hits it.
+
+```
+Step 1 — DevOps creates the namespace and deploys:
+  $ kubectl create namespace webtrader
+  $ kubectl -n webtrader apply -f webtrader-deployment.yaml  (via ArgoCD)
+  • Ingress created with host webtrader.dealing.internal → Service webtrader-svc:80.
+  • No NetworkPolicy needed — CCNP-1 + CCNP-3 grant baseline already.
+
+Step 2 — Cert-manager issues TLS for webtrader.dealing.internal:
+  Ingress annotation cert-manager.io/cluster-issuer: cluster-ca-issuer
+  → cert-manager creates Certificate resource → contacts internal CA → secret
+    webtrader-tls is created → Cilium IngressController picks it up.
+
+Step 3 — User visits https://webtrader.dealing.internal:
+  • Browser → DNS → 10.10.120.140 (Ingress LB IP)
+  • Browser → TLS handshake → Cilium-Envoy on a dealing node
+  • Envoy looks at Host header → routes to webtrader-svc Service IP
+  • Cilium BPF translates Service IP → webtrader pod IP
+  • Pod serves the HTML
+
+Step 4 — Webtrader pod calls api.github.com (e.g. to fetch some data):
+  • Pod → CoreDNS (10.43.0.10:53) → forwards to 8.8.8.8 → IP returned
+  • Pod → 140.82.x.x:443 → switch ACL allows public egress
+  • GitHub returns response
+
+Step 5 — Webtrader pod calls an internal db on cross-VLAN (e.g. 10.10.114.5:5432):
+  • Pod → 10.10.114.5:5432
+  • Cilium has no block (CCNP-1 is allow-only, no deny anywhere)
+  • Switch ACL: this cross-VLAN Postgres port is explicitly allowed → permitted.
+  • Postgres responds.
+
+Step 6 — Prometheus scrapes webtrader's /metrics:
+  • Prometheus pod → webtrader pod IP on port 9090 (or whatever /metrics port)
+  • CCNP-3 (ingress) allows monitoring/prometheus → all pods
+  • webtrader returns its metrics
+  • Prometheus → Mimir (Step 5 in 25.3 above)
+
+Step 7 — Webtrader pod writes a log line:
+  • stdout → containerd → /var/log/pods/...
+  • Alloy tails → Loki cross-VLAN (10.10.103.x switch-permitted)
+
+Step 8 — User sees the page; if anything goes wrong, on-call gets a Teams alert,
+         opens Grafana, sees the spike on the Overview dashboard, drills into
+         Hubble Drops if it's a network issue or container_oom_events if it's a workload issue.
+```
+
+That's the entire stack on one page. Anyone you onboard can read this and understand the cluster.
+
+---
 
 | Term | Meaning |
 |---|---|
