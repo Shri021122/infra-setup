@@ -13,7 +13,7 @@
 
 There is now a single-pane-of-glass dashboard for daily monitoring:
 
-> **** — "Overview — dealing cluster"
+**Dashboard URL:** `/d/overview-dealing` (full URL: `http://10.10.103.203:3000/d/overview-dealing`)
 
 Open this every morning. 4 rows on one screen:
 - **Row 1 — status gauges (color-coded):** Nodes, Etcd Leader, Running Pods, API avg latency, Cluster CPU %, Cluster Memory %
