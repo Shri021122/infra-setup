@@ -434,6 +434,107 @@ docs/
 
 ---
 
+## 24. Port and listener inventory
+
+The "what is this port and who owns it" reference. Use this when you see a port
+in a connection log, a NetworkPolicy decision, or `ss -tlnp` output.
+
+### 24.1 Listening on node IPs (all 6 nodes, masters + workers — except where noted)
+
+| Port | Proto | Listener | Bind | Purpose | Notes |
+|---|---|---|---|---|---|
+| 22 | TCP | sshd | `0.0.0.0` | SSH | Standard. Access via Pritunl VPN. |
+| 53 | UDP/TCP | systemd-resolved | `127.0.0.53` | Host DNS stub | Not the cluster DNS — that's CoreDNS on `10.43.0.10`. |
+| 111 | UDP/TCP | rpcbind | `0.0.0.0` | NFS portmap | Default Ubuntu service; not actively used by the cluster. |
+| 323 | UDP | chronyd | `127.0.0.1` | NTP client | Local time sync. |
+| 2379 | TCP | etcd | node IP | etcd **client port** (mTLS) | **Masters only.** apiserver and other clients connect here. |
+| 2380 | TCP | etcd | node IP | etcd **peer port** (mTLS) | **Masters only.** etcd members talk to each other on this. |
+| 2381 | TCP | etcd | node IP + `127.0.0.1` | etcd **metrics** (HTTP) | **Masters only.** Read-only Prometheus exposition. Enabled by `etcd-expose-metrics: true`. |
+| 2382 | TCP | etcd | `127.0.0.1` | etcd debug | Loopback only. Internal. |
+| 2112 | TCP | kube-vip | `*` | kube-vip metrics | **Masters only.** Prometheus exposition. |
+| 4240 | TCP | cilium-agent | node IP | Cilium **health-check endpoint** | Used by Hubble's reachability checks across nodes. |
+| 4244 | TCP | cilium-agent | `*` | Hubble peer-service (gRPC) | hubble-relay connects to each agent's 4244 to stream flows. |
+| 6443 | TCP | kube-apiserver | `*` | **Kube API server** (HTTPS, mTLS) | **Masters only.** Workers connect to `127.0.0.1:6443` via the local rke2-agent reverse proxy, which forwards to a real master through the VIP. |
+| 6443 | TCP | rke2 (workers) | `127.0.0.1` | Local apiserver proxy | **Workers only.** Workers don't run apiserver; this is the rke2-agent's local proxy. |
+| 6444 | TCP | rke2 (workers) | `127.0.0.1` | RKE2 internal | Workers only. |
+| 8472 | UDP | (kernel vxlan) | `0.0.0.0` | **Cilium vxlan overlay** | All pod-to-pod traffic across nodes goes through this. |
+| 9345 | TCP | rke2 | `*` | RKE2 **supervisor / agent registration** | **Masters only.** New workers contact this on join. |
+| 9879 | TCP | cilium-agent | `127.0.0.1` | Cilium gops debug | Loopback only. `go tool pprof`-friendly endpoint. |
+| 9890 | TCP | cilium-agent | `127.0.0.1` | Cilium agent debug | Loopback only. |
+| 9962 | TCP | cilium-agent | `*` | **Cilium agent Prometheus metrics** | Scraped by ServiceMonitor `cilium-agent`. |
+| 9963 | TCP | cilium-operator | (operator pod IP) | **Cilium operator Prometheus metrics** | Scraped by ServiceMonitor; only on whichever 2 nodes run cilium-operator. |
+| 9964 | TCP | cilium-envoy (embedded) | `0.0.0.0` | **Cilium Envoy admin metrics** | Scraped by ServiceMonitor `cilium-envoy` (added 2026-05-21). |
+| 9965 | TCP | cilium-agent | `*` | **Hubble metrics** (flow exporter) | Scraped by ServiceMonitor `hubble`. |
+| 10010 | TCP | containerd | `127.0.0.1` | Containerd metrics/CRI | Loopback only. |
+| 10248 | TCP | kubelet | `127.0.0.1` | kubelet **healthz** | Loopback only. |
+| 10250 | TCP | kubelet | `*` | **kubelet API + metrics** (HTTPS) | Scraped by ServiceMonitor `kubelet`. Also where apiserver does `kubectl exec/logs/port-forward`. |
+| 10257 | TCP | kube-controller-manager | `*` | **KCM metrics** (HTTPS) | **Masters only.** Bind changed from `127.0.0.1` → `0.0.0.0` on 2026-05-20 so Prometheus can scrape. |
+| 10258 | TCP | cloud-controller-manager | `127.0.0.1` | CCM internal | Loopback only. No cloud provider configured, so CCM is mostly idle. |
+| 10259 | TCP | kube-scheduler | `*` | **Scheduler metrics** (HTTPS) | **Masters only.** Same fix as KCM on 2026-05-20. |
+| 12345 | TCP | alloy | `127.0.0.1` | **Grafana Alloy UI / metrics** | Loopback only. Hit via SSH+port-forward. |
+| 51871 | UDP | (kernel WireGuard) | `0.0.0.0` | **Cilium WireGuard** | Encrypted pod-to-pod transport across nodes. |
+
+### 24.2 LoadBalancer / external IPs (Cilium L2 announcements)
+
+| IP | Port(s) | Service | Backed by | Purpose |
+|---|---|---|---|---|
+| `10.10.120.138` | 6443 | (control plane VIP) | kube-vip leader election | Kubeconfig and worker join URL. ARP'd by whichever master is currently kube-vip leader. |
+| `10.10.120.140` | 80, 443 | `kube-system/cilium-ingress` | Cilium IngressController | All Ingress traffic (argocd.dealing.internal, hubble.cluster.internal). |
+
+### 24.3 Cluster-internal Service IPs (10.43.0.0/16)
+
+A few key ones — the rest follow the normal `kubectl get svc -A` pattern:
+
+| Service | ClusterIP | Port(s) | Used by |
+|---|---|---|---|
+| `default/kubernetes` | `10.43.0.1` | 443 | Pods talking to kube-apiserver — DNAT'd by Cilium kube-proxy replacement to the apiserver static pods |
+| `kube-system/rke2-coredns-rke2-coredns` | `10.43.0.10` | 53 | All pod DNS lookups |
+| `kube-system/hubble-peer` | `10.43.214.53` | 443 | hubble-relay → per-node hubble-agents (gRPC) |
+| `monitoring/kube-prometheus-stack-prometheus` | `10.43.222.102` | 9090 | Prometheus query API; remote-write source |
+| `monitoring/kube-prometheus-stack-kube-state-metrics` | `10.43.51.179` | 8080 | KSM scrape target |
+| `argocd/argocd-server` | `10.43.172.88` | 80, 443 | Backend for `argocd.dealing.internal` Ingress |
+| `kube-system/hubble-ui` | `10.43.230.136` | 80 | Backend for `hubble.cluster.internal` Ingress |
+
+### 24.4 Quick reference: "what's port X?"
+
+| Port | Mnemonic |
+|---|---|
+| 2379/2380 | etcd (client/peer) |
+| 2381 | etcd metrics |
+| 4240/4244 | Cilium agent health / Hubble peer |
+| 6443 | apiserver |
+| 8472 | Cilium vxlan |
+| 9345 | RKE2 supervisor |
+| 9962/9963/9964/9965 | cilium-agent / cilium-operator / cilium-envoy / hubble metrics |
+| 10250 | kubelet |
+| 10257/10259 | KCM / scheduler |
+| 51871 | Cilium WireGuard |
+
+### 24.5 If you see a port you don't recognize
+
+Quick diagnosis path on any node:
+
+```bash
+sudo ss -tlnp sport = :<port>    # who is listening?
+sudo lsof -i :<port>             # alternate; might require lsof install
+ps -p <pid> -o pid,user,cmd      # what process is it?
+```
+
+For a *connection* you don't recognize:
+
+```bash
+sudo ss -tnp state established '( dport = :<port> or sport = :<port> )'
+```
+
+For a *blocked* connection (the kind we've been chasing this week):
+
+```bash
+AGENT=$(kubectl -n kube-system get pod -l k8s-app=cilium --field-selector spec.nodeName=$(hostname) -o jsonpath='{.items[0].metadata.name}')
+kubectl -n kube-system exec $AGENT -c cilium-agent -- hubble observe --verdict DROPPED --last 50 | grep ':<port>'
+```
+
+---
+
 ## Glossary (one-liners)
 
 | Term | Meaning |
