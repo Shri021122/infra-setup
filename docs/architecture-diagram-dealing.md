@@ -563,6 +563,238 @@ A single overview that brings it all together.
 
 ---
 
+## 11. End-to-end: public user → deployed app `xyz`
+
+This shows the full path a packet takes from a user's browser on the public internet,
+all the way to your `xyz` pod deployed on dealing. Every defense layer is annotated
+with what it does, what protocol/port, and where TLS gets terminated and re-encrypted.
+
+### 11.1 The chain — every hop
+
+```
+                       ┌───────────────────────────────┐
+                       │   END USER                    │
+                       │   public internet anywhere    │
+                       │   browser → https://xyz.<...> │
+                       └──────────────┬────────────────┘
+                                      │
+                                      │  1. DNS:  user's resolver → 1.1.1.1
+                                      │     → Cloudflare authoritative DNS
+                                      │     → returns Cloudflare anycast IP
+                                      ▼
+   ╔══════════════════════════════════════════════════════════════════════════╗
+   ║                          PUBLIC EDGE                                      ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 2. CLOUDFLARE  (the global anycast edge)                            │  ║
+   ║  │    • TLS termination #1   ← user cert (Cloudflare-managed)          │  ║
+   ║  │    • DDoS scrub (L3/L4 + L7)                                        │  ║
+   ║  │    • Bot management / rate limit / firewall rules                   │  ║
+   ║  │    • CDN cache hit? → respond directly, never bothers origin        │  ║
+   ║  │    • CDN miss → forward to next hop (TLS re-encrypts to origin)     │  ║
+   ║  │    Listening on: 443/TCP HTTPS                                       │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ║                                 │  HTTPS                                  ║
+   ║                                 ▼                                         ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 3. AWS CLOUDFRONT  (origin shield CDN tier in AWS)                  │  ║
+   ║  │    • TLS termination #2 ← Cloudflare↔CloudFront cert                │  ║
+   ║  │    • Second-tier cache (longer TTL than Cloudflare edge)            │  ║
+   ║  │    • Lambda@Edge / CloudFront Functions for request rewriting       │  ║
+   ║  │    Listening on: 443/TCP                                             │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ║                                 │  HTTPS                                  ║
+   ║                                 ▼                                         ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 4. AWS WAF  (Web Application Firewall, attached to CloudFront)      │  ║
+   ║  │    • L7 inspection — method, URL, headers, body                      │  ║
+   ║  │    • Managed rule sets (OWASP Top 10, Anonymous-IP, KnownBadInputs) │  ║
+   ║  │    • Custom rules (IP allowlist, geo block, rate limit per token)   │  ║
+   ║  │    • Drops → 403; allows → forward                                  │  ║
+   ║  │    (Stateless inspection — no TLS termination here, sees decrypted  │  ║
+   ║  │     stream from CloudFront)                                          │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ║                                 │  HTTPS                                  ║
+   ║                                 ▼                                         ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 5. AWS ALB / NLB  (load balancer fronting on-prem origin)           │  ║
+   ║  │    • L4 (NLB) or L7 (ALB) load balancing                            │  ║
+   ║  │    • Health checks against on-prem origin                            │  ║
+   ║  │    • Routes to on-prem via: Direct Connect / Site-to-Site VPN /     │  ║
+   ║  │      Transit Gateway                                                 │  ║
+   ║  │    • TLS termination #3 (optional, depends on ALB cert config)       │  ║
+   ║  │    Listening on: 443/TCP                                             │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ╚═════════════════════════════════╪═════════════════════════════════════════╝
+                                     │
+                                     │  HTTPS over Direct Connect / VPN tunnel
+                                     │  (private IP space at this point)
+                                     ▼
+   ╔══════════════════════════════════════════════════════════════════════════╗
+   ║                       ON-PREM PERIMETER                                   ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 6. PHYSICAL FIREWALL  (e.g. Palo Alto / FortiGate / Cisco ASA)      │  ║
+   ║  │    • Stateful packet inspection                                      │  ║
+   ║  │    • Application-layer policy (App-ID / AppCtrl)                    │  ║
+   ║  │    • Threat prevention (IPS signatures, anti-malware)               │  ║
+   ║  │    • Inbound NAT: public LB origin IP → internal corporate IP       │  ║
+   ║  │    • Logs every connection (SIEM-fed)                               │  ║
+   ║  │    Listening on: per ACL rules                                       │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ║                                 │  HTTPS — corporate L3                  ║
+   ║                                 ▼                                         ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 7. L3 SWITCH  (your switch fabric)                                  │  ║
+   ║  │    • VLAN routing                                                    │  ║
+   ║  │    • Cross-VLAN ACLs — only permitted ports between VLANs            │  ║
+   ║  │    • Forwards to dealing cluster VLAN 10.10.120.0/24                 │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ╚═════════════════════════════════╪═════════════════════════════════════════╝
+                                     │  HTTPS to 10.10.120.140 : 443
+                                     ▼
+   ╔══════════════════════════════════════════════════════════════════════════╗
+   ║                          DEALING CLUSTER                                  ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 8. CILIUM INGRESS LB IP  10.10.120.140                              │  ║
+   ║  │    • Cilium L2 Announcements — current leader cilium-agent answers  │  ║
+   ║  │      ARP for this IP                                                 │  ║
+   ║  │    • Packet hits one of the 6 nodes (whichever holds it now)         │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ║                                 │                                         ║
+   ║                                 ▼                                         ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 9. CILIUM-AGENT → embedded ENVOY (IngressController)                │  ║
+   ║  │    • TLS termination #4 (final, with app's cert from cert-manager)  │  ║
+   ║  │    • Reads HTTP Host header = xyz.<your-internal-domain>            │  ║
+   ║  │    • Looks up Ingress resource → backend Service xyz.<ns>.svc:80    │  ║
+   ║  │    • Hubble L7 metrics emitted for this request                     │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ║                                 │  plain HTTP (in-cluster)                ║
+   ║                                 ▼                                         ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 10. CILIUM BPF (kube-proxy replacement)                             │  ║
+   ║  │     • Service ClusterIP 10.43.x.x → backend pod IP 10.42.y.z         │  ║
+   ║  │     • O(1) BPF map lookup                                            │  ║
+   ║  │     • If destination pod is on a different node → WireGuard         │  ║
+   ║  │       encrypts and ships via cilium_wg0 (UDP :51871)                │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ║                                 │                                         ║
+   ║                                 ▼                                         ║
+   ║  ┌────────────────────────────────────────────────────────────────────┐  ║
+   ║  │ 11. XYZ POD  (running on some dealing-w-N)                           │  ║
+   ║  │     • CCNPs (platform-baseline-ingress) allow ingress from           │  ║
+   ║  │       IngressController identity                                      │  ║
+   ║  │     • Per-app CNP (if any) further restricts                          │  ║
+   ║  │     • Application container receives request on its container port    │  ║
+   ║  │     • Processes, generates response                                   │  ║
+   ║  └──────────────────────────────┬─────────────────────────────────────┘  ║
+   ╚═════════════════════════════════╪═════════════════════════════════════════╝
+                                     │
+                                     │  RESPONSE PATH retraces every hop in reverse.
+                                     │  Each hop re-encrypts with its own cert.
+                                     │  Each cache layer (Cloudflare, CloudFront) may
+                                     │  cache the response for next time.
+                                     ▼
+                       ┌───────────────────────────────┐
+                       │   END USER                    │
+                       │   browser renders the page    │
+                       └───────────────────────────────┘
+```
+
+### 11.2 Per-layer summary — what each layer does for you
+
+| # | Layer | Primary job | Defends against | TLS terminates here? |
+|---|---|---|---|---|
+| 1 | DNS resolver | Resolves the hostname | (none directly; DNSSEC if used) | n/a |
+| 2 | **Cloudflare** | CDN cache, DDoS scrub, global edge | Volumetric DDoS, bots, basic L7 attacks | **Yes** — first TLS endpoint |
+| 3 | **AWS CloudFront** | Origin-shield CDN closer to AWS | Origin fetch reduction, longer TTL caching | Yes (Cloudflare ↔ CloudFront cert) |
+| 4 | **AWS WAF** | L7 packet inspection rules | OWASP Top 10, SQL injection, XSS, abuse | (inspects decrypted stream — no separate TLS) |
+| 5 | **AWS ALB / NLB** | Routes to on-prem origin | Backend unhealthy targets, simple L4 floods | Optional re-encryption |
+| 6 | **Physical firewall** | Stateful inspection on-prem | Lateral movement, exfiltration, exploits | (sees encrypted stream; can do SSL decrypt if configured) |
+| 7 | **L3 switch** | VLAN routing + cross-VLAN ACLs | Lateral movement between VLANs | (no — L4 only) |
+| 8 | **Cilium L2 announce** | Picks a cluster node to receive | n/a — just MAC announcement | (no) |
+| 9 | **Cilium IngressController (Envoy)** | Routes by Host/path to Service | Bad Host headers, missing TLS | **Yes** — final TLS endpoint, app's cert |
+| 10 | **Cilium BPF** | Service IP → pod IP, encrypts if cross-node | Service-level pod-IP churn, MITM (via WG) | (no) |
+| 11 | **Pod (xyz)** | Runs the application | (app's own TLS/authn for any internal call) | (no — receives plain HTTP from Envoy) |
+
+### 11.3 Where TLS terminates (the certs at each layer)
+
+This is worth highlighting because **TLS doesn't go end-to-end from browser to pod by
+default** — it terminates and re-encrypts at multiple hops.
+
+```
+   Browser  ─────TLS (Cloudflare cert)────▶ Cloudflare edge
+                                            │
+                                            ▼
+                                            (decrypted, inspected,
+                                             cached as needed)
+                                            │
+   Cloudflare ──TLS (origin cert)──────────▶ AWS CloudFront → WAF → ALB
+                                                                   │
+                                                                   ▼
+                                                            (decrypted again)
+                                                                   │
+   ALB     ─────TLS (corp cert) over Direct Connect─────▶ Phys firewall → L3 sw
+                                                                   │
+                                                                   ▼
+                                                            (decrypted at Envoy)
+                                                                   │
+   Envoy   ────plain HTTP in-cluster────────────────────▶ xyz pod
+```
+
+If your security policy mandates end-to-end TLS to the pod, you can keep the in-cluster
+hop encrypted too by:
+- Terminating TLS at the pod (the app does TLS, not Envoy)
+- OR using mTLS via a service mesh (Linkerd / Istio / Cilium Service Mesh)
+- OR using Envoy's upstream TLS to a self-signed cert in the pod
+
+Most setups accept the plain in-cluster hop because pod-to-pod traffic is already
+WireGuard-encrypted between nodes.
+
+### 11.4 What gets logged where (forensics chain)
+
+| Hop | Logs that exist | Retention | Use when |
+|---|---|---|---|
+| Cloudflare | All requests (free + paid tiers) | hours-days (free) / years (paid) | DDoS / bot analysis |
+| CloudFront | Access logs to S3 | configurable | CDN miss debugging |
+| WAF | Sample of blocks + allows | configurable in CloudWatch | "Was X request blocked?" |
+| ALB | Access logs to S3 | configurable | "Did the request reach the origin?" |
+| Physical firewall | Connection logs to SIEM | per-corp policy | Cross-network forensics |
+| L3 switch | Flow logs (if enabled) | per-corp policy | VLAN-level traffic |
+| Cilium / Hubble | Flow events | in-memory + scrape to Mimir | "Was packet dropped by NetworkPolicy?" |
+| Envoy (IngressController) | hubble_http_* metrics in Mimir | retention per Mimir config | Per-route latency / status |
+| Pod / app | App logs → stdout → Alloy → Loki | per Loki retention | Application-level issues |
+
+You can build a forensic timeline of one request by querying these in order. The
+Hubble flow + Envoy access events + app log line all carry timestamps you can correlate.
+
+### 11.5 Quick mental shortcut
+
+**Three "trust zones" the request crosses:**
+
+```
+   PUBLIC INTERNET (untrusted)
+        │
+        │   Cloudflare + CloudFront + WAF + ALB  ─── defenses owned by your security team
+        │
+        ▼
+   CORPORATE NETWORK (semi-trusted)
+        │
+        │   Phys firewall + L3 switch ─── defenses owned by your network team
+        │
+        ▼
+   CLUSTER (trusted)
+        │
+        │   Cilium Ingress + Envoy + BPF + CCNPs + WireGuard ─── you (platform team)
+        │
+        ▼
+   POD (the app)
+```
+
+Each zone has its own security layer. A request that reaches your pod has been
+inspected and either explicitly permitted or implicitly trusted by every layer above.
+
+---
+
 ## How to render these for slides / reviews
 
 ASCII works in any terminal and any markdown viewer. If you want richer renderings:
