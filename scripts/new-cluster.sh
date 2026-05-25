@@ -97,7 +97,8 @@ ENVIRONMENT=$(ask "Environment" "production")
 hdr "Network"
 SUBNET_CIDR=$(ask "Subnet CIDR (e.g. 10.20.0.0/24)" "10.20.0.0/24")
 BASE="${SUBNET_CIDR%.*}"           # e.g. 10.20.0
-NETWORK_BRIDGE=$(ask "Proxmox network bridge" "vmbrk8s")
+NETWORK_BRIDGE=$(ask "Proxmox network bridge" "vmbr1")
+VLAN_TAG=$(ask "VLAN tag (0 = untagged)" "0")
 NETWORK_GATEWAY=$(ask "Network gateway" "${BASE}.1")
 DNS_SERVERS=$(ask "DNS servers (comma)" "${BASE}.1, 8.8.8.8")
 DOMAIN_NAME=$(ask "Internal domain" "cluster.internal")
@@ -215,7 +216,7 @@ network_subnet_cidr         = "${SUBNET_CIDR}"
 network_gateway             = "${NETWORK_GATEWAY}"
 dns_servers                 = ${DNS_HCL}
 domain_name                 = "${DOMAIN_NAME}"
-vlan_tag                    = 0
+vlan_tag                    = ${VLAN_TAG}
 control_plane_vip           = "${CONTROL_PLANE_VIP}"
 control_plane_vip_interface = "eth0"
 
