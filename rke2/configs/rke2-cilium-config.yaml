@@ -98,11 +98,11 @@ spec:
           annotations:
             cert-manager.io/cluster-issuer: "cluster-ca-issuer"
           hosts:
-            - hubble.cluster.internal    # Change to your domain
+            - hubble.CLUSTER_NAME_PLACEHOLDER.internal
           tls:
             - secretName: hubble-ui-tls
               hosts:
-                - hubble.cluster.internal
+                - hubble.CLUSTER_NAME_PLACEHOLDER.internal
 
       # Export Hubble metrics to Prometheus (→ remote-written to central Mimir)
       metrics:

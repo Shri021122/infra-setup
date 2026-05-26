@@ -76,7 +76,7 @@ install_master() {
   fi
 
   # ── STEP 1: Upload config ─────────────────────────────────────────────────
-  log "[1/7] Uploading RKE2 config..."
+  log "[1/8] Uploading RKE2 config..."
   ssh_exec "$node_ip" "sudo mkdir -p /etc/rancher/rke2"
   scp_file "$config_file" "$node_ip" "/tmp/rke2-config.yaml"
   ssh_exec "$node_ip" "sudo mv /tmp/rke2-config.yaml /etc/rancher/rke2/config.yaml && sudo chmod 600 /etc/rancher/rke2/config.yaml"
@@ -87,16 +87,16 @@ install_master() {
 
   # ── STEP 2: Install RKE2 binary ───────────────────────────────────────────
   if rke2_installed "$node_ip"; then
-    log "[2/7] RKE2 already installed — skipping download"
+    log "[2/8] RKE2 already installed — skipping download"
   else
-    log "[2/7] Installing RKE2 ${RKE2_VERSION}..."
+    log "[2/8] Installing RKE2 ${RKE2_VERSION}..."
     ssh_exec "$node_ip" "
       curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION='${RKE2_VERSION}' INSTALL_RKE2_TYPE='server' sh -
     "
   fi
 
   # ── STEP 3: Inject cluster token into config.yaml ─────────────────────────
-  log "[3/7] Setting cluster token..."
+  log "[3/8] Setting cluster token..."
   if [[ "$is_init" == "true" ]]; then
     if [[ -f "${SECRETS_DIR}/rke2-cluster-token" ]]; then
       log "  Token already exists — reusing ${SECRETS_DIR}/rke2-cluster-token"
@@ -118,7 +118,7 @@ install_master() {
 
   # ── STEP 4: Deploy manifests on init master ───────────────────────────────
   if [[ "$is_init" == "true" ]]; then
-    log "[4/7] Deploying kube-vip + Cilium manifests..."
+    log "[4/8] Deploying kube-vip + Cilium manifests..."
     local vip_iface
     vip_iface=$(grep 'control_plane_vip_interface' "${CONFIGS_DIR}/master-1-config.yaml" 2>/dev/null | awk '{print $2}' || echo "eth0")
 
@@ -168,11 +168,11 @@ KVEOF
     "
     rm -f /tmp/coredns-patched.yaml
   else
-    log "[4/7] Non-init master — skipping manifest deploy"
+    log "[4/8] Non-init master — skipping manifest deploy"
   fi
 
   # ── STEP 5: Kernel sysctl ─────────────────────────────────────────────────
-  log "[5/7] Applying kernel settings..."
+  log "[5/8] Applying kernel settings..."
   ssh_exec "$node_ip" "
     sudo sysctl -w kernel.panic=10
     sudo sysctl -w kernel.panic_on_oops=1
@@ -183,10 +183,10 @@ KVEOF
 
   # ── STEP 6: Start service ─────────────────────────────────────────────────
   if service_active "$node_ip"; then
-    log "[6/7] rke2-server already active — restarting to pick up config changes"
+    log "[6/8] rke2-server already active — restarting to pick up config changes"
     ssh_exec "$node_ip" "sudo systemctl restart rke2-server"
   else
-    log "[6/7] Starting rke2-server..."
+    log "[6/8] Starting rke2-server..."
     ssh_exec "$node_ip" "
       sudo systemctl daemon-reload
       sudo systemctl enable rke2-server
@@ -194,8 +194,28 @@ KVEOF
     "
   fi
 
-  # ── STEP 7: Wait for Ready ────────────────────────────────────────────────
-  log "[7/7] Waiting for node to become Ready (max 10 min)..."
+  # ── STEP 7: Pre-install Prometheus Operator CRDs (init only) ──────────────
+  # Cilium's HelmChartConfig enables ServiceMonitors for Hubble, agent, and
+  # operator. Helm rejects unknown kinds even with trustCRDsExist=true, so
+  # CRDs must exist before helm-install-rke2-cilium runs. --server-side is
+  # required because these CRDs exceed the 256KB last-applied-config limit.
+  if [[ "$is_init" == "true" ]]; then
+    log "[7/8] Pre-installing Prometheus Operator CRDs..."
+    scp_file "${CONFIGS_DIR}/prometheus-operator-crds.yaml" "$node_ip" "/tmp/prom-crds.yaml"
+    ssh_exec "$node_ip" "
+      for i in \$(seq 1 60); do
+        sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get --raw=/readyz >/dev/null 2>&1 && break
+        sleep 5
+      done
+      sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml apply --server-side --force-conflicts -f /tmp/prom-crds.yaml
+      rm -f /tmp/prom-crds.yaml
+    "
+  else
+    log "[7/8] Non-init master — skipping CRD pre-install"
+  fi
+
+  # ── STEP 8: Wait for Ready ────────────────────────────────────────────────
+  log "[8/8] Waiting for node to become Ready (max 10 min)..."
   local max_wait=600
   local waited=0
   until node_is_ready "$node_ip"; do
