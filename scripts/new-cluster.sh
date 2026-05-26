@@ -273,21 +273,21 @@ cat > "${CLUSTER_DIR}/observability.tfvars" <<EOF
 kubeconfig_path = "../../clusters/${CLUSTER_NAME}/kubeconfig.yaml"
 cluster_name    = "${CLUSTER_NAME}"
 environment     = "${ENVIRONMENT}"
+entity          = "${CLUSTER_NAME}"
 
+# ─── Central Mimir ────────────────────────────────────────────────────────────
 central_mimir_url      = "${MIMIR_URL}"
 central_mimir_username = ""
+mimir_tenant_id        = "${CLUSTER_NAME}"
 
+# ─── Central Loki (consumed by Alloy on each VM) ──────────────────────────────
 central_loki_url       = "${LOKI_URL}"
 central_loki_username  = ""
 loki_tenant_id         = "${CLUSTER_NAME}"
 
-prometheus_replicas       = 2
-prometheus_storage_size   = "20Gi"
-prometheus_retention_days = 3
-
-alertmanager_replicas  = 2
-alertmanager_email_to  = "devops@example.com"
-alertmanager_smtp_host = ""
+# ─── Prometheus (agent mode) ──────────────────────────────────────────────────
+prometheus_retention_days  = 3
+prometheus_scrape_interval = "30s"
 EOF
 
 if [[ "$WANT_ARGOCD" =~ ^[Yy] ]]; then

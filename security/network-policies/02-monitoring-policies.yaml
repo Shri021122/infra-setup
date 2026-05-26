@@ -1,11 +1,19 @@
 ################################################################################
 # Network Policies — Monitoring Stack
-# Architecture: Prometheus + Alertmanager + kube-state-metrics in-cluster.
-# Grafana, Loki, Mimir are centralized (external) — no in-cluster pods.
-# Alloy runs as systemd on each VM OS — not a Kubernetes pod, no policy needed.
+#
+# Prometheus (agent mode) runs in-cluster and remote_writes to a central Mimir.
+# Grafana, Loki and Mimir themselves are external; Alloy runs as systemd on
+# each VM (not a pod) so it isn't governed by NetworkPolicy.
+#
+# In-cluster scrapes (cilium-agent, hubble, argocd, kubelet on node IPs, etc.)
+# are allowed by the `platform-baseline-egress` CCNP via toEntities:
+# cluster,host,remote-node. This NetworkPolicy only adds rules for EXTERNAL
+# targets the CCNP doesn't cover — primarily the central Mimir endpoint.
+#
+# MIMIR_IP_PLACEHOLDER and MIMIR_PORT_PLACEHOLDER are substituted at deploy
+# time by scripts/deploy.sh from central_mimir_url in observability.tfvars.
 ################################################################################
 ---
-# Prometheus — scrape all namespaces, accept queries from in-cluster clients
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -19,47 +27,19 @@ spec:
     - Egress
     - Ingress
   egress:
-    # Scrape all in-cluster pods across all namespaces (any port)
+    # Scrape every in-cluster pod across all namespaces
     - to:
         - namespaceSelector: {}
-    # Outbound HTTPS — Mimir remote-write, Slack/PagerDuty webhooks, etc.
+    # Central Mimir endpoint (remote_write) — substituted by deploy.sh
+    - to:
+        - ipBlock:
+            cidr: MIMIR_IP_PLACEHOLDER/32
+      ports:
+        - port: MIMIR_PORT_PLACEHOLDER
+          protocol: TCP
+    # Outbound HTTPS — webhooks, Mimir/Loki behind TLS termination, etc.
     - ports:
         - port: 443
-          protocol: TCP
-    # Mimir/Loki/Grafana on the observability subnet (HTTP)
-    - to:
-        - ipBlock:
-            cidr: 10.10.103.0/24
-      ports:
-        - port: 80
-          protocol: TCP
-    # kube-apiserver on the cluster subnet (via VIP or direct master IPs)
-    - to:
-        - ipBlock:
-            cidr: 10.10.120.0/24
-      ports:
-        - port: 6443
-          protocol: TCP
-    # Scrape control-plane + host-network metric endpoints on dealing nodes.
-    # Required because these are reached by node IP, not pod IP, so the
-    # "namespaceSelector: {}" rule above doesn't cover them.
-    - to:
-        - ipBlock:
-            cidr: 10.10.120.0/24
-      ports:
-        - port: 10250    # kubelet (+ /metrics/cadvisor, /metrics/probes)
-          protocol: TCP
-        - port: 10257    # kube-controller-manager
-          protocol: TCP
-        - port: 10259    # kube-scheduler
-          protocol: TCP
-        - port: 2381     # etcd metrics (etcd-expose-metrics: true)
-          protocol: TCP
-        - port: 9962     # cilium-agent
-          protocol: TCP
-        - port: 9963     # cilium-operator
-          protocol: TCP
-        - port: 9965     # hubble-metrics
           protocol: TCP
     # DNS
     - ports:
@@ -68,14 +48,7 @@ spec:
         - port: 53
           protocol: TCP
   ingress:
-    # Alertmanager
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: alertmanager
-      ports:
-        - port: 9090
-    # Allow pods with label prometheus.io/access to query Prometheus directly
+    # Pods labelled prometheus.io/access=true may query Prometheus directly
     - from:
         - namespaceSelector: {}
           podSelector:
@@ -83,37 +56,3 @@ spec:
               prometheus.io/access: "true"
       ports:
         - port: 9090
----
-# Alertmanager — accept from Prometheus, send notifications outbound
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: alertmanager-network-policy
-  namespace: monitoring
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: alertmanager
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: prometheus
-      ports:
-        - port: 9093
-  egress:
-    # Slack / PagerDuty / email webhooks (HTTPS + SMTP)
-    - ports:
-        - port: 443
-          protocol: TCP
-        - port: 587
-          protocol: TCP
-    # DNS
-    - ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP

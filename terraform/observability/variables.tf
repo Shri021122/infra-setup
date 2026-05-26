@@ -1,13 +1,11 @@
 ################################################################################
 # Observability Stack Variables
 #
-# Architecture:
-#   IN CLUSTER  → Prometheus (kube-state-metrics, etcd, API server metrics)
-#                 Alertmanager
-#   ON EACH VM  → Grafana Alloy (pod logs, journald, node metrics)
-#   CENTRALIZED → Grafana + Mimir + Loki  (yours — not deployed here)
-#   REMOVED     → Promtail (replaced by Alloy), PMM (your existing server),
-#                 node-exporter (replaced by Alloy), Loki server, Mimir server
+# IN CLUSTER  → Prometheus (agent mode) — scrapes ServiceMonitors + kubelet
+#               + kube-state-metrics, remote_writes everything to central Mimir.
+# ON EACH VM  → Grafana Alloy (systemd) — pod logs, journald, node + etcd metrics.
+# CENTRALIZED → Grafana + Mimir + Loki (not deployed here).
+# REMOVED     → Alertmanager, in-cluster Grafana, node-exporter, kube-proxy SM.
 ################################################################################
 
 variable "kubeconfig_path" {
@@ -18,68 +16,40 @@ variable "kubeconfig_path" {
 variable "cluster_name" {
   description = "Cluster name — attached as label to all metrics and logs"
   type        = string
-  default     = "rke2-prod"
 }
 variable "environment" {
   description = "Environment label (production, staging, development)"
   type        = string
   default     = "production"
 }
+variable "entity" {
+  description = "Entity/tenant identifier. Defaults to cluster_name when empty."
+  type        = string
+  default     = ""
+}
 variable "monitoring_namespace" {
-  description = "Namespace for Prometheus and Alertmanager"
+  description = "Namespace for Prometheus"
   type        = string
   default     = "monitoring"
 }
+
 # ─── Prometheus ───────────────────────────────────────────────────────────────
 
 variable "prometheus_retention_days" {
-  description = "Local retention (short — Mimir holds long-term)"
+  description = "WAL retention buffer (agent mode keeps a small buffer for remote_write recovery)"
   type        = number
   default     = 3
 }
-variable "prometheus_storage_size" {
-  description = "PVC size for Prometheus local buffer"
+variable "prometheus_scrape_interval" {
+  description = "Default Prometheus scrape interval"
   type        = string
-  default     = "20Gi"
+  default     = "30s"
 }
-variable "prometheus_storage_class" {
-  description = "StorageClass for Prometheus PVC"
-  type        = string
-  default     = "local-path"
-}
-variable "prometheus_replicas" {
-  description = "Prometheus replicas (2 = HA)"
-  type        = number
-  default     = 2
-}
-variable "prometheus_cpu_request" {
-  type = string
-  default = "500m"
-}
-variable "prometheus_memory_request" {
-  type = string
-  default = "2Gi"
-}
-variable "prometheus_cpu_limit" {
-  type = string
-  default = "2000m"
-}
-variable "prometheus_memory_limit" {
-  type = string
-  default = "8Gi"
-}
-variable "prometheus_remote_write_timeout" {
-  type    = string
-  default = "30s"
-}
-variable "prometheus_remote_write_queue_max_samples" {
-  type    = number
-  default = 10000
-}
+
 # ─── Centralized Mimir ────────────────────────────────────────────────────────
 
 variable "central_mimir_url" {
-  description = "Your centralized Mimir remote-write URL"
+  description = "Central Mimir remote-write URL"
   type        = string
 }
 variable "central_mimir_username" {
@@ -93,12 +63,16 @@ variable "central_mimir_password" {
   sensitive   = true
   default     = ""
 }
-# ─── Centralized Loki ─────────────────────────────────────────────────────────
-# Used only by Alloy (configured in rke2/configs/alloy-config.alloy.tpl).
-# Terraform reads these so deploy.sh can pass them to install-alloy.sh.
+variable "mimir_tenant_id" {
+  description = "X-Scope-OrgID for Mimir multi-tenancy. Defaults to cluster_name when empty."
+  type        = string
+  default     = ""
+}
+
+# ─── Centralized Loki (consumed by Alloy on each VM, not in-cluster) ──────────
 
 variable "central_loki_url" {
-  description = "Your centralized Loki push base URL (no path — Alloy adds /loki/api/v1/push)"
+  description = "Central Loki push base URL (no path — Alloy adds /loki/api/v1/push)"
   type        = string
 }
 variable "central_loki_username" {
@@ -116,24 +90,4 @@ variable "loki_tenant_id" {
   description = "Loki tenant/org ID — defaults to cluster_name if empty"
   type        = string
   default     = ""
-}
-# ─── Alertmanager ─────────────────────────────────────────────────────────────
-
-variable "alertmanager_slack_webhook" {
-  type      = string
-  sensitive = true
-  default   = ""
-}
-variable "alertmanager_pagerduty_key" {
-  type      = string
-  sensitive = true
-  default   = ""
-}
-variable "alertmanager_email_to" {
-  type = string
-  default = ""
-}
-variable "alertmanager_smtp_host" {
-  type = string
-  default = ""
 }

@@ -1,25 +1,20 @@
 ################################################################################
 # Observability Stack — Centralized Grafana + Mimir + Loki
 #
-# What runs IN this cluster (Kubernetes):
-#   - Prometheus          → scrapes kube-state-metrics, etcd, API server metrics
-#                           remote-writes to central Mimir
-#   - Alertmanager (×2)  → alert routing (Slack / PagerDuty / email)
-#   - kube-state-metrics  → Kubernetes object metrics (deployments, pods, etc.)
-#   - (node-exporter DISABLED — Alloy on each VM replaces it)
+# IN CLUSTER (this terraform):
+#   - Prometheus (agent mode)  → scrapes ServiceMonitors + kube-state-metrics
+#                                + kubelet → remote_writes to central Mimir
+#   - kube-state-metrics       → Kubernetes object metrics
 #
-# What runs on each VM (systemd, NOT in Kubernetes):
-#   - Grafana Alloy       → pod logs + journald → central Loki
-#                           node metrics → central Mimir
-#                           etcd metrics (masters only) → central Mimir
-#   Installed by: rke2/scripts/install-alloy.sh (called by install-master/worker.sh)
+# ON EACH VM (rke2/scripts/install-alloy.sh, not terraform):
+#   - Grafana Alloy            → pod logs + journald → central Loki
+#                                node + etcd metrics → central Mimir
 #
-# NOT deployed:
-#   - Grafana    (centralized)
-#   - Loki server (centralized — Alloy pushes directly)
-#   - Mimir      (centralized — Prometheus remote-writes to yours)
-#   - PMM        (your existing PMM server; no DB pods in this cluster)
-#   - Promtail   (replaced by Alloy on the OS)
+# NOT DEPLOYED:
+#   - Alertmanager   (off — central / external)
+#   - Grafana        (centralized)
+#   - node-exporter  (Alloy does this on the OS)
+#   - kube-proxy SM  (Cilium replaces kube-proxy)
 ################################################################################
 
 terraform {
@@ -55,36 +50,20 @@ provider "kubectl" {
   config_path = var.kubeconfig_path
 }
 
-# ─── kube-prometheus-stack ────────────────────────────────────────────────────
-# Deploys: Prometheus (HA) + Alertmanager + kube-state-metrics
-# node-exporter is DISABLED — Alloy on each VM collects node metrics instead
-# Grafana is DISABLED — use your central Grafana
-
 module "prometheus_stack" {
   source = "./modules/prometheus"
 
-  namespace         = var.monitoring_namespace
-  cluster_name      = var.cluster_name
-  environment       = var.environment
-  retention_days    = var.prometheus_retention_days
-  storage_size      = var.prometheus_storage_size
-  storage_class     = var.prometheus_storage_class
-  replicas          = var.prometheus_replicas
-  cpu_request       = var.prometheus_cpu_request
-  memory_request    = var.prometheus_memory_request
-  cpu_limit         = var.prometheus_cpu_limit
-  memory_limit      = var.prometheus_memory_limit
+  namespace       = var.monitoring_namespace
+  cluster_name    = var.cluster_name
+  environment     = var.environment
+  entity          = var.entity
+  mimir_tenant_id = var.mimir_tenant_id
+  retention_days  = var.prometheus_retention_days
+  scrape_interval = var.prometheus_scrape_interval
 
   central_mimir_url      = var.central_mimir_url
   central_mimir_username = var.central_mimir_username
   central_mimir_password = var.central_mimir_password
-  remote_write_timeout   = var.prometheus_remote_write_timeout
-  remote_write_queue_max = var.prometheus_remote_write_queue_max_samples
-
-  alertmanager_slack_webhook = var.alertmanager_slack_webhook
-  alertmanager_pagerduty_key = var.alertmanager_pagerduty_key
-  alertmanager_email_to      = var.alertmanager_email_to
-  alertmanager_smtp_host     = var.alertmanager_smtp_host
 }
 
 # ─── Central Grafana Instructions ─────────────────────────────────────────────
@@ -94,28 +73,23 @@ output "central_grafana_datasource_instructions" {
   value = <<-EOT
     ─── Your central Grafana — query this cluster ─────────────────────────────
 
-    METRICS (Mimir — Kubernetes objects + cluster components):
-      Label filter:  cluster = "${var.cluster_name}"
-      Comes from:    Prometheus remote-write (kube-state-metrics, etcd, API server)
+    METRICS (Mimir — Kubernetes + cluster components):
+      Label filter:    cluster_name = "${var.cluster_name}"
+      X-Scope-OrgID:   "${var.mimir_tenant_id != "" ? var.mimir_tenant_id : var.cluster_name}"
+      Comes from:      Prometheus (agent mode) remote_write
+                       (kube-state-metrics, kubelet, every ServiceMonitor)
 
-    METRICS (Mimir — node-level: CPU, RAM, disk, network):
-      Label filter:  cluster = "${var.cluster_name}"
-      Comes from:    Grafana Alloy on each VM (prometheus.exporter.unix)
+    METRICS (Mimir — node + etcd):
+      Label filter:    cluster = "${var.cluster_name}"
+      Comes from:      Grafana Alloy on each VM (prometheus.exporter.unix + etcd)
 
     LOGS (Loki — pod logs):
-      Stream:  {cluster="${var.cluster_name}", namespace="..."}
-      Comes from: Grafana Alloy on each VM reading /var/log/pods/*
+      Stream:          {cluster="${var.cluster_name}", namespace="..."}
+      Comes from:      Grafana Alloy reading /var/log/pods/*
 
-    LOGS (Loki — system/RKE2 logs):
-      Stream:  {cluster="${var.cluster_name}", job="systemd-journal", unit="rke2-server.service"}
-      Comes from: Grafana Alloy reading journald on each VM
-
-    Recommended dashboard imports (filter all by cluster="${var.cluster_name}"):
-      7249  — Kubernetes Cluster Overview
-      1860  — Node Exporter Full (works with Alloy's prometheus.exporter.unix)
-      3070  — etcd
-      13639 — Loki Logs
-      16611 — Cilium / Hubble
+    LOGS (Loki — system/RKE2):
+      Stream:          {cluster="${var.cluster_name}", job="systemd-journal", unit="rke2-server.service"}
+      Comes from:      Grafana Alloy reading journald
     ───────────────────────────────────────────────────────────────────────────
   EOT
 }

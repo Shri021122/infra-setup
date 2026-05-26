@@ -7,67 +7,37 @@ variable "cluster_name" {
 variable "environment" {
   type = string
 }
-variable "replicas" {
-  type = number
+variable "entity" {
+  description = "Entity label attached to every metric (defaults to cluster_name when empty)."
+  type        = string
+  default     = ""
+}
+variable "mimir_tenant_id" {
+  description = "X-Scope-OrgID for central Mimir multi-tenancy (defaults to cluster_name when empty)."
+  type        = string
+  default     = ""
 }
 variable "retention_days" {
-  type = number
+  description = "Local WAL retention. Agent mode keeps a small buffer for remote_write recovery."
+  type        = number
+  default     = 3
 }
-variable "storage_size" {
-  type = string
+variable "scrape_interval" {
+  description = "Default scrape interval (Prometheus + every ServiceMonitor without an override)."
+  type        = string
+  default     = "30s"
 }
-variable "storage_class" {
-  type = string
-}
-variable "cpu_request" {
-  type = string
-}
-variable "memory_request" {
-  type = string
-}
-variable "cpu_limit" {
-  type = string
-}
-variable "memory_limit" {
-  type = string
-}
-# Centralized Mimir remote-write
+
+# ─── Central Mimir ────────────────────────────────────────────────────────────
 variable "central_mimir_url" {
   type = string
 }
 variable "central_mimir_username" {
-  type = string
+  type    = string
   default = ""
 }
 variable "central_mimir_password" {
-  type = string
+  type      = string
   sensitive = true
-  default = ""
-}
-variable "remote_write_timeout" {
-  type = string
-  default = "30s"
-}
-variable "remote_write_queue_max" {
-  type = number
-  default = 10000
-}
-# Alertmanager
-variable "alertmanager_slack_webhook" {
-  type = string
-  sensitive = true
-  default = ""
-}
-variable "alertmanager_pagerduty_key" {
-  type = string
-  sensitive = true
-  default = ""
-}
-variable "alertmanager_email_to" {
-  type = string
-  default = ""
-}
-variable "alertmanager_smtp_host" {
-  type = string
-  default = ""
+  default   = ""
 }

@@ -414,7 +414,32 @@ phase4_security() {
 
   # 4c — Network policies
   log "4c. Applying network policies (default-deny + monitoring allow rules)..."
-  run kubectl apply -f "${SECURITY_DIR}/network-policies/"
+  # 02-monitoring-policies.yaml has MIMIR_{IP,PORT}_PLACEHOLDER that must be
+  # substituted from central_mimir_url before kubectl apply (K8s NetworkPolicy
+  # only supports IP blocks, not DNS names — so resolve here at deploy time).
+  local mimir_url mimir_hostport mimir_host mimir_ip mimir_port
+  mimir_url=$(grep '^central_mimir_url' "${CLUSTER_DIR}/observability.tfvars" | awk -F'"' '{print $2}')
+  mimir_hostport="${mimir_url#*//}"; mimir_hostport="${mimir_hostport%%/*}"
+  mimir_host="${mimir_hostport%:*}"
+  mimir_port="${mimir_hostport##*:}"
+  # If host is not already an IP, resolve via DNS
+  if [[ "$mimir_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    mimir_ip="$mimir_host"
+  else
+    mimir_ip=$(getent hosts "$mimir_host" | awk '{print $1}' | head -1)
+    [[ -z "$mimir_ip" ]] && err "Cannot resolve Mimir host '$mimir_host' to an IP"
+  fi
+  log "  Mimir egress allowlist: ${mimir_ip}:${mimir_port} (from ${mimir_url})"
+
+  for f in "${SECURITY_DIR}/network-policies/"*.yaml; do
+    if [[ "$(basename "$f")" == "02-monitoring-policies.yaml" ]]; then
+      sed -e "s/MIMIR_IP_PLACEHOLDER/${mimir_ip}/g" \
+          -e "s/MIMIR_PORT_PLACEHOLDER/${mimir_port}/g" "$f" \
+        | run kubectl apply -f -
+    else
+      run kubectl apply -f "$f"
+    fi
+  done
   success "  Network policies applied"
 
   # 4d — cert-manager
