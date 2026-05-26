@@ -34,7 +34,7 @@ variable "argocd_chart_version" {
     Verify against https://github.com/argoproj/argo-helm/releases before bumping.
   EOT
   type        = string
-  default     = "7.7.0"
+  default     = "8.3.0"
 }
 
 # ─── Topology ─────────────────────────────────────────────────────────────────

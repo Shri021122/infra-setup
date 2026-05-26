@@ -302,7 +302,7 @@ cluster_name     = "${CLUSTER_NAME}"
 environment      = "${ENVIRONMENT}"
 
 argocd_namespace     = "argocd"
-argocd_chart_version = "7.7.0"
+argocd_chart_version = "8.3.0"
 
 argocd_ha_enabled          = false
 argocd_server_service_type = "ClusterIP"
