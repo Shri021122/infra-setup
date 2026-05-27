@@ -22,6 +22,9 @@ clusters/*/tfstate/
 clusters/*/kubeconfig.yaml
 clusters/*/rbac-kubeconfigs/
 clusters/*/handoff.md
+# tf-outputs.json is a Terraform output dump that contains the cluster SSH
+# PRIVATE KEY — must never be committed.
+clusters/*/tf-outputs.json
 
 # Terraform state — use remote backend in production
 *.tfstate
