@@ -1,0 +1,102 @@
+# Data-at-rest encryption — design, operations, and residual risk
+
+Status: implemented for **fxview-test** (2026-05-27). Gated behind `enable_disk_encryption`
+so other clusters (e.g. the `9200`-based prod cluster) are unaffected until they opt in.
+
+This is the authoritative reference. The host-side template build is in
+[`disk-encryption-template-build.md`](./disk-encryption-template-build.md); the build tool is
+[`scripts/build-encrypted-template.sh`](../scripts/build-encrypted-template.sh).
+
+---
+
+## Two layers (and what was actually needed)
+
+| Layer | Mechanism | Status |
+|-------|-----------|--------|
+| **K8s Secrets at rest in etcd** | RKE2 **enables this by default** (AES-CBC, `--encryption-provider-config`) | ✅ already on — verified `rke2 secrets-encrypt status` = Enabled |
+| **Full-disk (root + data)** | Guest-level **LUKS2**, auto-unlocked by a **per-VM virtual TPM** via **Clevis** | ✅ implemented for fxview-test |
+
+> RKE2 secrets encryption was **already enabled** out of the box — no change required. The work here
+> is the full-disk layer.
+
+## Architecture
+
+```
+Proxmox clones the encrypted template (9011/9020) per node:
+  scsi0 (root)  → ESP + /boot (plaintext) + LUKS2 → LVM (ubuntu-vg/ubuntu-lv, ext4)
+                   └─ unlocked at boot by CLEVIS from this VM's vTPM (clevis-initramfs)
+  scsi1 (data)  → LUKS2 → ext4 (masters: etcd) / xfs (workers: /var/lib/rancher)
+                   └─ unlocked by a keyfile that lives ON the (already-encrypted) root,
+                      referenced from /etc/crypttab → opens automatically after root is up
+  vTPM (tpmstate) → added per-VM by Terraform; sealed clevis key (no PCR policy: unlocks
+                    whenever THIS vTPM is present)
+  recovery        → the install-time LUKS passphrase is KEPT (in /root/luks-template/tempkey
+                    on the build host) so a TPM problem can never brick a node
+```
+
+**Why Clevis, not `systemd-cryptenroll --tpm2-device`:** Ubuntu 22.04's initramfs uses the *classic*
+`cryptsetup-initramfs`, which **ignores** the `tpm2-device=` crypttab option (that's a
+`systemd-cryptsetup` feature). Clevis (`clevis-initramfs` + `clevis-tpm2`) is what actually performs
+TPM-based LUKS unlock in this initramfs. An earlier `systemd-cryptenroll` attempt booted to a passphrase
+prompt — Clevis is the correct mechanism here.
+
+**Root auto-grow:** because the root is LUKS+LVM, plain cloud-init `growpart` can't expand it. The
+Terraform provisioner runs the full chain (`growpart → cryptsetup resize → pvresize → lvextend →
+resize2fs`) so the root fills whatever `*_disk_size_gb` is set to.
+
+## How it's wired
+
+- **Template:** `9011` (or `9020` after the no-reboot patch) — UEFI/OVMF, LUKS2 encrypted root, clevis +
+  tpm2 tooling, generalized for cloning. Built by `scripts/build-encrypted-template.sh`.
+- **Terraform:** `enable_disk_encryption` (default `false`) in `terraform/proxmox/variables.tf`, passed to
+  both modules. When true: `bios = ovmf`, `efi_disk` + `tpm_state` blocks, and the `scsi1` provisioner
+  does LUKS + keyfile-crypttab + root auto-grow. When false: seabios + plain `mkfs` (unchanged).
+- **Per cluster:** set in `clusters/<name>/proxmox.tfvars`:
+  ```hcl
+  vm_template_id         = 9011    # encrypted template
+  enable_disk_encryption = true
+  ```
+
+## Threat model — what it does and doesn't protect
+
+| Scenario | Protected? |
+|----------|:--:|
+| Someone steals a powered-off VM's virtual disk image (or a disk-only backup) | ✅ |
+| Stolen etcd snapshot / backup (Secrets stay encrypted by RKE2's at-rest key) | ✅ |
+| Live node compromised (disks already unlocked) | ❌ (at-rest control only) |
+| **Theft of the entire `pve-4` host** (attacker gets the vTPM state file *and* the disks) | ❌ **residual risk** |
+
+### Residual risk you are explicitly accepting
+
+The per-VM vTPM is a **state file Proxmox stores on `pve-4`, which is not itself encrypted** (the cluster
+team has VM/API access only, no host root). So TPM auto-unlock protects a stolen *disk in isolation*, but
+**not** whole-host theft — an attacker with the entire host storage gets vTPM + disk and can replay the
+unlock.
+
+**To close it (recommended for the stricter prod rollout):**
+- **Host-level LUKS on `pve-4`** (full-disk encryption of the host's own storage) — needs host root, and
+  a boot-unlock strategy (TPM2 on the physical host, or a Tang server). This is the real "data at rest"
+  control for the host-theft case.
+- Or add **Tang** as a second factor to the clevis binding (`sss` with tpm2 + tang) so a node only unlocks
+  on the trusted LAN.
+
+## Operations
+
+- **Recovery passphrase:** the install-time LUKS passphrase is kept on every node. It's stored at
+  `/root/luks-template/tempkey` on the build host. **Back it up securely and out-of-band.** If clevis/TPM
+  ever fails to unlock, enter it at the `Please unlock disk` prompt. Consider rotating it post-deploy
+  (`cryptsetup luksChangeKey`) so it isn't the shared build key.
+- **etcd-snapshot backups must include the RKE2 encryption key** (`/var/lib/rancher/rke2/server/cred/`).
+  A snapshot restored without it cannot decrypt its Secrets. Verify your external backup job covers it.
+- **Verify a node:** `clevis luks list -d <dev>` shows the tpm2 binding; `lsblk` shows LUKS on root +
+  data; a reboot returns to login with no passphrase; pulling the vTPM makes it block (the proof).
+- **Resize a disk:** change `*_disk_size_gb` in tfvars and re-apply — the provisioner auto-grows the
+  encrypted root; the data disk is `mkfs`'d at full size.
+
+## Recommended sizing (per node role)
+
+| Disk | Holds | Recommend |
+|------|-------|-----------|
+| OS root (`scsi0`) | OS, RKE2, logs (incl. audit on masters) | 50 GB |
+| etcd (`scsi1`, masters) | etcd DB + 10 local snapshots | 30 GB |
+| data (`scsi1`, workers) | container images + volumes (`/var/lib/rancher`) | 100 GB+ |

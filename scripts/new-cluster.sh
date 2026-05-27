@@ -109,7 +109,17 @@ LB_POOL_CIDR=$(ask "Ingress LB pool CIDR (/32 = one IP)" "${BASE}.200/32")
 hdr "Proxmox connection"
 PROXMOX_API_URL=$(ask "Proxmox API URL" "https://10.10.16.249:8006/api2/json")
 PROXMOX_NODE=$(ask "Proxmox node name" "pve-4")
-TEMPLATE_VM_ID=$(ask "Cloud-init template VM ID" "9200")
+# Data-at-rest encryption. The flag and the template MUST move together: an
+# encrypted UEFI template needs enable_disk_encryption=true (UEFI+vTPM), and a
+# plain cloud-image template needs it false — mismatching them won't boot.
+ENCRYPT_DISKS=$(ask "Encrypt disks at rest? UEFI + vTPM + LUKS (y/n)" "n")
+if [[ "$ENCRYPT_DISKS" =~ ^[Yy] ]]; then
+  ENABLE_DISK_ENCRYPTION=true
+  TEMPLATE_VM_ID=$(ask "Encrypted UEFI template VM ID (e.g. 9011/9020)" "9011")
+else
+  ENABLE_DISK_ENCRYPTION=false
+  TEMPLATE_VM_ID=$(ask "Cloud-init template VM ID (plain)" "9200")
+fi
 DISK_STORAGE=$(ask "Disk storage pool" "pve-4-storage")
 SNIPPET_FILE_ID=$(ask "Shared cloud-init snippet (leave empty to skip)" "local:snippets/k8s-common.yaml")
 
@@ -223,6 +233,10 @@ control_plane_vip_interface = "eth0"
 vm_template_id      = ${TEMPLATE_VM_ID}
 vm_template_storage = "local-lvm"
 
+# Data-at-rest encryption (UEFI + per-VM vTPM + LUKS root/data). MUST pair with an
+# encrypted UEFI template (e.g. 9011/9020). false = plain seabios cloud-image template.
+enable_disk_encryption = ${ENABLE_DISK_ENCRYPTION}
+
 vm_ssh_public_key       = "${SSH_PUBKEY}"
 vm_ssh_private_key_path = "${SSH_KEY_PATH}"
 vm_user                 = "${VM_USER}"
@@ -324,6 +338,13 @@ fi
 
 log "✓ Wrote ${CLUSTER_DIR}/proxmox.tfvars"
 log "✓ Wrote ${CLUSTER_DIR}/observability.tfvars"
+if [[ "$ENABLE_DISK_ENCRYPTION" == "true" ]]; then
+  log ""
+  log "${YELLOW}Disk encryption ON${NC} → template ${TEMPLATE_VM_ID}. Before deploy, confirm that template is your"
+  log "  encrypted-root UEFI build:  ${CYAN}qm config ${TEMPLATE_VM_ID}${NC}  (expect bios: ovmf + efidisk0)."
+  log "  If it still has the first-boot reboot, use the no-reboot template (9020) or be ready to re-run"
+  log "  ${CYAN}deploy.sh ${CLUSTER_NAME} --from phase2${NC} if a node trips. See ${CYAN}docs/disk-encryption.md${NC}."
+fi
 log ""
 log "${BOLD}Next steps:${NC}"
 log "  1. Review the generated files:  ${CYAN}\${EDITOR:-vi} ${CLUSTER_DIR}/*.tfvars${NC}"

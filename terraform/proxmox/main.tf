@@ -44,26 +44,30 @@ module "master_nodes" {
   index    = count.index
 
   # Proxmox placement
-  proxmox_node    = var.proxmox_node
-  template_vm_id  = var.vm_template_id
-  disk_storage    = var.master_disk_storage
+  proxmox_node   = var.proxmox_node
+  template_vm_id = var.vm_template_id
+  disk_storage   = var.master_disk_storage
+
+  # Data-at-rest encryption (UEFI + vTPM + LUKS). Gated; default off.
+  enable_disk_encryption = var.enable_disk_encryption
+  luks_passphrase        = var.luks_passphrase
 
   # Resources
-  cpu_cores        = var.master_cpu_cores
-  cpu_sockets      = var.master_cpu_sockets
-  memory_mb        = var.master_memory_mb
-  disk_size_gb     = var.master_disk_size_gb
+  cpu_cores         = var.master_cpu_cores
+  cpu_sockets       = var.master_cpu_sockets
+  memory_mb         = var.master_memory_mb
+  disk_size_gb      = var.master_disk_size_gb
   etcd_disk_size_gb = var.master_etcd_disk_size_gb
-  cpu_type         = var.vm_cpu_type
-  os_type          = var.vm_os_type
+  cpu_type          = var.vm_cpu_type
+  os_type           = var.vm_os_type
 
   # Network
-  network_bridge  = var.network_bridge
-  ip_address      = length(var.master_ip_addresses) > count.index ? var.master_ip_addresses[count.index] : ""
-  gateway         = var.network_gateway
-  vlan_tag        = var.vlan_tag
-  dns_servers     = var.dns_servers
-  domain_name     = var.domain_name
+  network_bridge = var.network_bridge
+  ip_address     = length(var.master_ip_addresses) > count.index ? var.master_ip_addresses[count.index] : ""
+  gateway        = var.network_gateway
+  vlan_tag       = var.vlan_tag
+  dns_servers    = var.dns_servers
+  domain_name    = var.domain_name
 
   # Cloud-init
   cloud_init_user_data_file_id = var.shared_cloud_init_snippet_file_id
@@ -71,17 +75,17 @@ module "master_nodes" {
   vm_user                      = var.vm_user
 
   # Behavior
-  agent_enabled   = var.vm_agent_enabled
-  protection      = var.vm_protection
-  start_on_boot   = var.vm_start_on_boot
+  agent_enabled = var.vm_agent_enabled
+  protection    = var.vm_protection
+  start_on_boot = var.vm_start_on_boot
 
   # SSH provisioner key
   ssh_private_key_path = var.vm_ssh_private_key_path
 
   # RKE2
-  rke2_version   = var.rke2_version
-  cluster_name   = var.cluster_name
-  is_init_node   = count.index == 0  # First master bootstraps the cluster
+  rke2_version = var.rke2_version
+  cluster_name = var.cluster_name
+  is_init_node = count.index == 0 # First master bootstraps the cluster
 
   tags = merge(var.tags, {
     role = "master"
@@ -109,14 +113,18 @@ module "worker_nodes" {
   template_vm_id = var.vm_template_id
   disk_storage   = var.worker_disk_storage
 
+  # Data-at-rest encryption (UEFI + vTPM + LUKS). Gated; default off.
+  enable_disk_encryption = var.enable_disk_encryption
+  luks_passphrase        = var.luks_passphrase
+
   # Resources
-  cpu_cores          = var.worker_cpu_cores
-  cpu_sockets        = var.worker_cpu_sockets
-  memory_mb          = var.worker_memory_mb
-  disk_size_gb       = var.worker_disk_size_gb
-  data_disk_size_gb  = var.worker_data_disk_size_gb
-  cpu_type           = var.vm_cpu_type
-  os_type            = var.vm_os_type
+  cpu_cores         = var.worker_cpu_cores
+  cpu_sockets       = var.worker_cpu_sockets
+  memory_mb         = var.worker_memory_mb
+  disk_size_gb      = var.worker_disk_size_gb
+  data_disk_size_gb = var.worker_data_disk_size_gb
+  cpu_type          = var.vm_cpu_type
+  os_type           = var.vm_os_type
 
   # Network
   network_bridge = var.network_bridge
@@ -166,14 +174,14 @@ resource "local_file" "ansible_inventory" {
         ip       = w.ip_address
       }
     ]
-    ssh_user            = var.vm_user
-    ssh_private_key     = var.vm_ssh_private_key_path
-    control_plane_vip   = var.control_plane_vip
-    rke2_version        = var.rke2_version
-    rke2_cni            = var.rke2_cni
-    cluster_cidr        = var.rke2_cluster_cidr
-    service_cidr        = var.rke2_service_cidr
-    cluster_name        = var.cluster_name
+    ssh_user          = var.vm_user
+    ssh_private_key   = var.vm_ssh_private_key_path
+    control_plane_vip = var.control_plane_vip
+    rke2_version      = var.rke2_version
+    rke2_cni          = var.rke2_cni
+    cluster_cidr      = var.rke2_cluster_cidr
+    service_cidr      = var.rke2_service_cidr
+    cluster_name      = var.cluster_name
   })
 }
 
@@ -186,18 +194,18 @@ resource "local_file" "rke2_master_config" {
 
   filename = "${path.module}/../../rke2/configs/master-${each.key + 1}-config.yaml"
   content = templatefile("${path.module}/templates/rke2-master-config.yaml.tpl", {
-    node_ip          = each.value.ip_address
-    node_name        = each.value.hostname
-    is_init_node     = tonumber(each.key) == 0
-    init_node_ip     = module.master_nodes[0].ip_address
+    node_ip           = each.value.ip_address
+    node_name         = each.value.hostname
+    is_init_node      = tonumber(each.key) == 0
+    init_node_ip      = module.master_nodes[0].ip_address
     control_plane_vip = var.control_plane_vip
-    vip_interface    = var.control_plane_vip_interface
-    cluster_cidr     = var.rke2_cluster_cidr
-    service_cidr     = var.rke2_service_cidr
-    cluster_dns      = var.rke2_cluster_dns
-    cni              = var.rke2_cni
-    cluster_name     = var.cluster_name
-    master_ips       = [for m in module.master_nodes : m.ip_address]
+    vip_interface     = var.control_plane_vip_interface
+    cluster_cidr      = var.rke2_cluster_cidr
+    service_cidr      = var.rke2_service_cidr
+    cluster_dns       = var.rke2_cluster_dns
+    cni               = var.rke2_cni
+    cluster_name      = var.cluster_name
+    master_ips        = [for m in module.master_nodes : m.ip_address]
   })
 }
 

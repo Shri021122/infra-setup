@@ -100,6 +100,38 @@ variable "vm_template_id" {
   type        = number
 }
 
+# ─── Disk Encryption (data-at-rest) ───────────────────────────────────────────
+
+variable "enable_disk_encryption" {
+  description = <<-EOT
+    When true, clone an ENCRYPTED-ROOT UEFI template (e.g. 9011): VMs are created
+    as UEFI/OVMF with a per-VM virtual TPM (clevis auto-unlocks the LUKS root),
+    the scsi1 data/etcd disk is LUKS-encrypted (key on the encrypted root), and
+    the encrypted root is auto-grown to fill scsi0.
+
+    When false (default), behaves exactly as before: seabios, no TPM, plain
+    mkfs on the data disk — for the unencrypted cloud-image template (e.g. 9200).
+    Set per-cluster in that cluster's proxmox.tfvars; leave unset elsewhere so
+    existing clusters are untouched.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "luks_passphrase" {
+  description = <<-EOT
+    LUKS recovery passphrase (the encrypted template's build key, kept as a
+    recovery keyslot). Supply ONLY via the environment at deploy time:
+      TF_VAR_luks_passphrase="$(cat /root/luks-template/tempkey)" ./scripts/deploy.sh <cluster>
+    It is used ONLY inside the node provisioner to `cryptsetup resize` the encrypted
+    root — it is never written to tfvars and not stored in state. Leave empty to
+    skip the root resize (root then stays at the template size; data is on scsi1).
+  EOT
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "vm_template_storage" {
   description = "Storage pool where the template lives"
   type        = string

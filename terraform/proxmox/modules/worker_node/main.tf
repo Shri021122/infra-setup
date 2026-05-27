@@ -17,6 +17,50 @@ terraform {
   }
 }
 
+locals {
+  data_mount = "/var/lib/rancher"
+
+  # Expand the LUKS+LVM encrypted root to fill scsi0 (see master_node for rationale).
+  # Grow the encrypted root to fill scsi0. cryptsetup resize needs the LUKS volume
+  # key, so the real resize runs ONLY when var.luks_passphrase is supplied (pass it
+  # at deploy via TF_VAR_luks_passphrase — used only here, never persisted). Without
+  # it we grow just the partition and skip the LUKS resize (no hang; root stays at
+  # the template size — fine, data lives on scsi1).
+  grow_root_steps = !var.enable_disk_encryption ? [] : (
+    var.luks_passphrase != "" ? [
+      "echo '== growing encrypted root to fill scsi0 =='",
+      "sudo growpart /dev/sda 3 || true",
+      "printf '%s' '${var.luks_passphrase}' | sudo cryptsetup resize dm_crypt-0 || echo 'WARN: cryptsetup resize failed — check TF_VAR_luks_passphrase; root stays at template size'",
+      "sudo pvresize /dev/mapper/dm_crypt-0 || true",
+      "sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv || true",
+      "sudo resize2fs /dev/ubuntu-vg/ubuntu-lv || true",
+      ] : [
+      "echo '== root grow: partition only (no luks_passphrase given); root stays at template size =='",
+      "sudo growpart /dev/sda 3 || true",
+    ]
+  )
+
+  # scsi1 = /dev/sdb = container/data disk, mounted at /var/lib/rancher.
+  data_disk_steps = var.enable_disk_encryption ? [
+    # LUKS2 + keyfile-on-encrypted-root + crypttab auto-unlock (after TPM-unlocked root).
+    "sudo mkdir -p /etc/luks-keys && sudo chmod 700 /etc/luks-keys",
+    "test -f /etc/luks-keys/data.key || (sudo dd if=/dev/urandom of=/etc/luks-keys/data.key bs=512 count=1 status=none && sudo chmod 400 /etc/luks-keys/data.key)",
+    "sudo cryptsetup luksFormat --type luks2 --batch-mode /dev/sdb /etc/luks-keys/data.key",
+    "sudo cryptsetup open --key-file /etc/luks-keys/data.key /dev/sdb cryptdata",
+    "echo \"cryptdata UUID=$(sudo blkid -s UUID -o value /dev/sdb) /etc/luks-keys/data.key luks,discard\" | sudo tee -a /etc/crypttab",
+    "sudo mkfs.xfs -f -L containerd /dev/mapper/cryptdata",
+    "sudo mkdir -p ${local.data_mount}",
+    "echo '/dev/mapper/cryptdata ${local.data_mount} xfs defaults,noatime,nodiratime 0 2' | sudo tee -a /etc/fstab",
+    "sudo mount ${local.data_mount}",
+    ] : [
+    # Plain, unencrypted (original behavior).
+    "sudo mkfs.xfs -f -L containerd /dev/sdb",
+    "sudo mkdir -p ${local.data_mount}",
+    "echo 'LABEL=containerd ${local.data_mount} xfs defaults,noatime,nodiratime 0 2' | sudo tee -a /etc/fstab",
+    "sudo mount -a",
+  ]
+}
+
 resource "proxmox_virtual_environment_vm" "worker" {
   vm_id       = var.vm_id
   name        = var.hostname
@@ -42,7 +86,7 @@ resource "proxmox_virtual_environment_vm" "worker" {
   # Enable memory ballooning on workers — workload-dependent usage
   memory {
     dedicated = var.memory_mb
-    floating  = var.memory_mb / 2  # Min guaranteed = 50% of dedicated
+    floating  = var.memory_mb / 2 # Min guaranteed = 50% of dedicated
   }
 
   # Root disk — RESIZES the cloned template disk (must match template interface: scsi0)
@@ -115,7 +159,26 @@ resource "proxmox_virtual_environment_vm" "worker" {
   }
 
   machine = "q35"
-  bios    = "seabios"
+  # Encrypted-root template (9011) is UEFI; cloud-image template (9200) is BIOS.
+  bios = var.enable_disk_encryption ? "ovmf" : "seabios"
+
+  # UEFI vars disk + per-VM virtual TPM — only when cloning the encrypted template
+  # (clevis uses this TPM to auto-unlock the LUKS root at boot).
+  dynamic "efi_disk" {
+    for_each = var.enable_disk_encryption ? [1] : []
+    content {
+      datastore_id      = var.disk_storage
+      type              = "4m"
+      pre_enrolled_keys = false
+    }
+  }
+  dynamic "tpm_state" {
+    for_each = var.enable_disk_encryption ? [1] : []
+    content {
+      datastore_id = var.disk_storage
+      version      = "v2.0"
+    }
+  }
 
   operating_system {
     type = var.os_type
@@ -132,8 +195,8 @@ resource "proxmox_virtual_environment_vm" "worker" {
   }
 
   # bpg/proxmox uses top-level timeout_* args (seconds), not a timeouts block
-  timeout_clone  = 1200
-  timeout_create = 1200
+  timeout_clone   = 1200
+  timeout_create  = 1200
   timeout_stop_vm = 300
 }
 
@@ -154,28 +217,28 @@ resource "null_resource" "setup_worker_data_disk" {
   }
 
   provisioner "remote-exec" {
-    inline = [
-      "cloud-init status --wait",
-      # Format data disk with XFS (preferred for container workloads)
-      "sudo mkfs.xfs -f -L containerd /dev/sdb",
-      "sudo mkdir -p /var/lib/rancher",
-      "echo 'LABEL=containerd /var/lib/rancher xfs defaults,noatime,nodiratime 0 2' | sudo tee -a /etc/fstab",
-      "sudo mount -a",
-      # Kernel tuning for worker nodes
-      "echo 'vm.swappiness=0' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
-      "echo 'fs.inotify.max_user_watches=524288' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
-      "echo 'fs.inotify.max_user_instances=512' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
-      "echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
-      "echo 'net.bridge.bridge-nf-call-iptables=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
-      "echo 'net.bridge.bridge-nf-call-ip6tables=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
-      "echo 'kernel.panic=10' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
-      "echo 'kernel.panic_on_oops=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
-      "echo 'net.core.somaxconn=32768' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
-      "sudo modprobe br_netfilter",
-      "sudo modprobe overlay",
-      "echo 'br_netfilter' | sudo tee -a /etc/modules-load.d/rke2.conf",
-      "echo 'overlay' | sudo tee -a /etc/modules-load.d/rke2.conf",
-      "sudo sysctl --system",
-    ]
+    # Wait for cloud-init, (encryption only) grow the encrypted root, set up the
+    # data disk (LUKS or plain per local.data_disk_steps), then kernel tuning.
+    inline = concat(
+      ["cloud-init status --wait"],
+      local.grow_root_steps,
+      local.data_disk_steps,
+      [
+        "echo 'vm.swappiness=0' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+        "echo 'fs.inotify.max_user_watches=524288' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+        "echo 'fs.inotify.max_user_instances=512' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+        "echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+        "echo 'net.bridge.bridge-nf-call-iptables=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+        "echo 'net.bridge.bridge-nf-call-ip6tables=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+        "echo 'kernel.panic=10' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+        "echo 'kernel.panic_on_oops=1' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+        "echo 'net.core.somaxconn=32768' | sudo tee -a /etc/sysctl.d/99-rke2.conf",
+        "sudo modprobe br_netfilter",
+        "sudo modprobe overlay",
+        "echo 'br_netfilter' | sudo tee -a /etc/modules-load.d/rke2.conf",
+        "echo 'overlay' | sudo tee -a /etc/modules-load.d/rke2.conf",
+        "sudo sysctl --system",
+      ],
+    )
   }
 }

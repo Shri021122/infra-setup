@@ -35,6 +35,13 @@ control_plane_vip_interface = "eth0"
 vm_template_id      = 9200
 vm_template_storage = "local-lvm"
 
+# ─── Data-at-rest encryption ──────────────────────────────────────────────────
+# true  → UEFI + per-VM vTPM + LUKS root/data (clevis auto-unlock). REQUIRES an
+#         encrypted UEFI template (e.g. 9011/9020) in vm_template_id above.
+# false → plain seabios cloud-image template (9200). Default off.
+# The flag and the template must match, or nodes won't boot. See docs/disk-encryption.md.
+enable_disk_encryption = false
+
 # ─── SSH Access (public key only — paste yours; private stays on workstation) ─
 vm_ssh_public_key       = "ssh-ed25519 AAAA... rke2-cluster-deploy"
 vm_ssh_private_key_path = "~/.ssh/rke2_cluster_id"

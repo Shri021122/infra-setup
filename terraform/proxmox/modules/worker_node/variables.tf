@@ -83,3 +83,14 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+variable "enable_disk_encryption" {
+  description = "UEFI + per-VM vTPM + LUKS data disk + auto-grow encrypted root. Default off (seabios, plain mkfs)."
+  type        = bool
+  default     = false
+}
+variable "luks_passphrase" {
+  description = "LUKS recovery passphrase (the template's build key). Supply ONLY via TF_VAR_luks_passphrase at deploy time to grow the encrypted root; used only in the provisioner, never persisted to state/tfvars. Empty = skip the root resize."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
