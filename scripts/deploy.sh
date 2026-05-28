@@ -420,8 +420,20 @@ phase4_security() {
   local mimir_url mimir_hostport mimir_host mimir_ip mimir_port
   mimir_url=$(grep '^central_mimir_url' "${CLUSTER_DIR}/observability.tfvars" | awk -F'"' '{print $2}')
   mimir_hostport="${mimir_url#*//}"; mimir_hostport="${mimir_hostport%%/*}"
-  mimir_host="${mimir_hostport%:*}"
-  mimir_port="${mimir_hostport##*:}"
+  # If host:port has a colon, split it. Otherwise the URL omitted a port —
+  # default from the scheme. Without this guard, ${var%:*} / ${var##*:} both
+  # return the whole string unchanged when there's no ':', leaking the hostname
+  # into mimir_port and rendering an invalid NetworkPolicy (kubectl apply fails).
+  if [[ "$mimir_hostport" == *:* ]]; then
+    mimir_host="${mimir_hostport%:*}"
+    mimir_port="${mimir_hostport##*:}"
+  else
+    mimir_host="$mimir_hostport"
+    case "${mimir_url%%:*}" in
+      https) mimir_port=443 ;;
+      *)     mimir_port=80  ;;
+    esac
+  fi
   # If host is not already an IP, resolve via DNS
   if [[ "$mimir_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     mimir_ip="$mimir_host"
