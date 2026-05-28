@@ -93,6 +93,71 @@ unlock.
 - **Resize a disk:** change `*_disk_size_gb` in tfvars and re-apply — the provisioner auto-grows the
   encrypted root; the data disk is `mkfs`'d at full size.
 
+## `TF_VAR_luks_passphrase` — what it is and where it flows
+
+This environment variable lets you supply the LUKS recovery passphrase to the deploy so the encrypted
+root **auto-grows** to whatever `*_disk_size_gb` you've set. **Its value is the build tempkey** stored
+at `/root/luks-template/tempkey` on the host that built the template — they're the same string. Set it
+at deploy time:
+
+```bash
+export TF_VAR_luks_passphrase="$(ssh root@<pve> cat /root/luks-template/tempkey)"
+./scripts/deploy.sh <cluster-name>
+unset TF_VAR_luks_passphrase    # cleanup
+```
+
+End-to-end path through the code:
+
+```
+TF_VAR_luks_passphrase  (env)
+        ↓
+terraform/proxmox/variables.tf    →  variable "luks_passphrase" { sensitive = true }
+        ↓  (passed through terraform/proxmox/main.tf)
+modules/{master,worker}_node/variables.tf  →  variable "luks_passphrase" (also sensitive)
+        ↓
+modules/{master,worker}_node/main.tf  locals.grow_root_steps:
+   "printf '%s' '${var.luks_passphrase}' | sudo cryptsetup resize dm_crypt-0 || echo WARN..."
+        ↓
+SSH provisioner runs that one line on each VM. `cryptsetup resize` reads the
+passphrase from stdin (no prompt), authorizes the LUKS volume key, then the
+chain pvresize → lvextend → resize2fs grows the root.
+```
+
+It is used **only inside the provisioner inline** and is **never persisted** — not written to tfvars,
+not stored in Terraform state, not echoed in apply output (Terraform suppresses the provisioner output
+because the variable is `sensitive`). If you leave it unset, root stays at the template's size
+(~18 GB) and the deploy still succeeds — data lives on `scsi1`, so that's usually fine.
+
+## Backup checklist — what to keep safe for the cluster's lifetime
+
+Lose these and you may not be able to recover. Back them up **out-of-band** (password manager,
+encrypted vault, multiple offline copies):
+
+| # | Item | Where it lives | Why it matters |
+|---|------|----------------|----------------|
+| **1** | **LUKS recovery passphrase** (the build tempkey — same value as `TF_VAR_luks_passphrase`) | `/root/luks-template/tempkey` on the Proxmox host that built the template | **The master key.** If a TPM ever fails, you type this at the LUKS prompt to unlock a node manually. |
+| **2** | **Cluster SSH private key** | `~/.ssh/rke2_cluster_id` (per `vm_ssh_private_key_path` in tfvars) on whoever runs the deploy | Terraform/deploy/install scripts use it; also your ongoing SSH access. Lose it → can't SSH in. |
+| **3** | **RKE2 secrets-encryption key** | `/var/lib/rancher/rke2/server/cred/` on every master (especially the init master) | Encrypts K8s Secrets in etcd. **Required to restore an etcd snapshot** — without it, restored Secrets are unreadable. |
+| **4** | **etcd snapshots + the cred dir, paired** | `/var/lib/rancher/rke2/server/db/snapshots/` + the cred dir above | One is useless without the other. Your external backup job MUST cover both. |
+| **5** | **Cluster kubeconfig** | `clusters/<name>/kubeconfig.yaml` (gitignored) | Full cluster-admin credential. |
+| **6** | **Proxmox API credentials** | `TF_VAR_proxmox_password` / `TF_VAR_proxmox_api_token` env | Required for any Terraform re-apply. |
+| **7** | **Terraform state** | `clusters/<name>/tfstate/` (gitignored) | Knows which resources exist. Back up for recovery. |
+| **8** | **Per-VM vTPM state files** | Proxmox host storage: the per-VM `tpmstate` volume | If you back up VMs, include vTPM state (vzdump does). Without it the node's clevis binding is dead — falls back to the recovery passphrase. |
+
+**Items #1 and #3 are the two irreplaceable ones** — they can't be regenerated. Everything else can be
+rotated or rebuilt from infrastructure-as-code.
+
+### Practical steps
+- Put **`tempkey`** (#1) and the contents of **`cred/`** (#3) into your secure vault now, for *every*
+  cluster you build.
+- Make sure your etcd-snapshot job copies the **cred dir alongside the snapshot file** (#4) — they need
+  to land together in the backup target.
+- Label each backed-up `tempkey` with the **template ID + Proxmox host that built it**, so future-you
+  knows which key matches which environment. Rebuild the template **per environment** so different
+  environments don't share a recovery key (smaller blast radius if one leaks).
+- Treat the **encrypted template image itself** as sensitive too — it carries the temp key in its LUKS
+  header. Don't publish it; restrict access on the Proxmox host.
+
 ## Recommended sizing (per node role)
 
 | Disk | Holds | Recommend |
